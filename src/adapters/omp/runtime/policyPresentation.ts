@@ -5,6 +5,19 @@ import { brandPolicyText } from "../policyIdentity.js";
 
 const PLUGIN_NAME = "omp-semantic-policy";
 
+export const DEFAULT_ENABLED_TOOL_CALLS: readonly string[] = [
+  "bash",
+  "eval",
+  "python",
+  "write",
+  "edit",
+  "task",
+  "hub",
+  "browser",
+  "computer",
+  "debug",
+];
+
 export type AutomaticConfirmationDefault = "approve" | "deny";
 
 export interface PolicyRuntimeSettings {
@@ -56,7 +69,7 @@ export async function loadPolicyRuntimeSettings(
     overrides.disabledToolCalls ?? configured.disabledToolCalls,
   );
   const enabledToolCalls = normalizeToolCallNames(
-    overrides.enabledToolCalls ?? configured.enabledToolCalls,
+    overrides.enabledToolCalls ?? configured.enabledToolCalls ?? DEFAULT_ENABLED_TOOL_CALLS,
   );
   return {
     showStatus: overrides.showStatus ?? configured.showStatus !== false,

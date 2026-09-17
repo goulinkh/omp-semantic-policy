@@ -9,9 +9,9 @@ const NON_MUTATING_OPERATIONS: Readonly<Partial<Record<PolicyOperation, true>>> 
 /**
  * Provide safe behavior when compiled/semantic policy cannot decide an action.
  *
- * Reads and local workflow operations continue. Every action capable of an
- * external side effect requires explicit interactive approval and therefore
- * becomes a denial in headless OMP sessions.
+ * Reads and local workflow operations continue. Actions capable of an external
+ * side effect return a confirmation request for the host to resolve using its
+ * configured automatic default or interactive approval.
  */
 export function createConservativeFallback(): PolicyFallbackEvaluator {
   return {

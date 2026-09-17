@@ -26,7 +26,7 @@ host event
   -> host enforcement and audit record
 ```
 
-Deterministic checks run first and allow a snapshot action only when no compiled rule applies. Model evaluation handles semantic matching, ambiguity, hard constraints, and workflow checks; it cannot weaken an earlier deterministic result. Provider unavailability reaches a conservative fallback.
+Deterministic grounded path protections run before remote-coverage filters. Semantic evaluation handles the remaining applicable instructions, ambiguity, and workflow checks; it cannot weaken a local denial. Filtered calls skip TypeSafe, not all policy enforcement. No applicable rules can produce a local allow. Incomplete action evidence is unassessed and blocking even with a permissive confirmation default; other unavailable evaluation reaches the configured conservative fallback without becoming a violation judgment.
 
 ## Normalized action
 
@@ -36,11 +36,11 @@ The implemented `PolicyAction` records:
 - actor plus session and optional parent-session lineage;
 - working directory;
 - operation class: read, write, execute, delegate, network, workflow, internal, or unknown;
-- host operation, structured input, and source metadata when available;
-- normalized targets;
+- host operation, structured input, source metadata, normalized action details, and completeness;
+- normalized targets, including grounded routed-operation and delegated-dispatch evidence when available;
 - interception capability: precise, dispatch-only, advisory, or absent.
 
-The evaluation context separately carries headless state and optional authorization and snapshot references. The OMP runtime populates both from `before_agent_start` and the active project snapshot without coupling actions to storage.
+The evaluation context separately carries headless state and optional authorization and snapshot references. Ordinary `before_agent_start` text starts request-scoped with `explicit: false`, not blanket approval of implementation. A whole affirmative literal Run/Execute request may be host-bound to the identical complete bash command; environment overrides, another working directory, and extra command segments do not inherit that authorization. Matching uses original input, not redacted summaries. Direct user actions and host-validated one-use maintenance grants are also exact-action scoped and bound to the full action digest. Authorization does not override an absolute applicable prohibition.
 
 The engine does not depend on OMP tool names. The OMP adapter translates `write`, `edit`, `bash`, `eval`, `task`, MCP calls, and future tools into the shared operation vocabulary.
 
@@ -59,7 +59,7 @@ type PolicyDecision =
     };
 ```
 
-Decision evidence identifies the evaluator, evidence class, and matched rule identifiers. Every snapshot records model, compiler, question, and threshold versions. User-facing explanations stay concise; durable audit records contain redacted target summaries, decisions, and outcomes.
+Decision evidence separates actual matched rule identifiers from applicable candidate identifiers and links grounded decisive rules to source provenance. Diagnostics retain the local/coverage/semantic/unavailable path, provider raw choice/confidence/hard-violation probability, adapter effect, and final confirmation resolution/enforced effect. Every snapshot records model, compiler, question, and threshold versions; provider diagnostics additionally record the resolved response model, not only the configured alias. Durable audits contain redacted actions, authorization, decisions, and outcomes. `/policy audit [1–100]` exposes recent records; see [Policy Tuning](tuning.md) for interpretation and experimental limits.
 
 ## Instruction classification
 
@@ -70,7 +70,7 @@ Compiled instructions use four behavioral classes:
 3. **Advisory preference** — style or preference guidance.
 4. **Semantic statement** — statements that do not safely fit the first three classes.
 
-Classification retains source provenance and precedence. Enforcement uses the semantic model when applicable rules exist; ambiguity or provider failure requires review rather than silently becoming a hard denial.
+Classification retains headings, source provenance, precedence, and conservative phase applicability. Narrow, unconditional literal-path prohibitions can compile to local enforcement; conditions, permissions, and exceptions must remain available to semantic assessment rather than being turned into unconditional bans. The current local grammar is deliberately not a general natural-language or shell interpreter. Applicable semantic ambiguity and provider failure remain distinct from a proven violation even when both ultimately block.
 
 ## Policy snapshot
 
@@ -120,20 +120,24 @@ The first provider integration is TypeSafe:
 - one-time profile consent before remote egress;
 - redaction before egress;
 - only applicable instruction statements, normalized action metadata, and redacted current-turn authorization are transmitted;
-- large applicable rule sets are partitioned into bounded requests without dropping rules, then combined conservatively.
+- complete relevant policy context in one bounded request; oversized state is reported as unavailable instead of splitting related prohibitions, permissions, and exceptions into unsafe independent chunks.
 
 ## Availability behavior
 
-Local deterministic rules remain available without the remote provider. If semantic evaluation is unavailable:
+Local deterministic rules remain available without the remote provider. Defaults leave routine inspection outside semantic checks and automatically enforce checked actions without dialogs:
 
 - reads are allowed unless a deterministic rule protects the target;
 - model `allow` and `deny` decisions remain authoritative;
-- model confirmation requests automatically use `confirmationDefault` (`deny` by default) unless their confidence reaches the configured `confirmationThreshold`;
-- `confirmationThreshold: 1` disables confirmation dialogs, while `0` keeps the user in the loop for every confirmation request;
+- model confirmation requests automatically use `confirmationDefault` (`deny` by default) unless interactive prompting is explicitly enabled and their confidence reaches the configured `confirmationThreshold`;
+- `confirmationThreshold: 1` is the default automatic mode; a value below `1` opts into prompts, and `0` prompts for every confirmation request;
 - an unavailable semantic evaluator uses the same confirmation default and is treated as maximum-confidence uncertainty when interactive confirmation is enabled;
 - any remaining prompt denies when the host cannot present confirmation;
 
-Unknown tools follow the same conservative behavior. Fallback text explicitly says the action was not classified as compliant or noncompliant. It must not present provider unavailability as evidence that a value—such as an empty credential field—is a policy violation. Missing credentials are identified separately as `login required`; feedback directs the user to `/login typesafe-ai` or `TYPESAFE_API_KEY`. Credential-resolution and provider-evaluation failures have distinct safe diagnostics.
+Checked unknown tools follow the same configured behavior. Uncertainty and provider unavailability are not compliance judgments: the automatic default denies them. `confirmationDefault: "approve"` explicitly opts into fail-open resolution; it never overrides an explicit policy denial. Existing explicit settings are preserved, so previously saved approval overrides must be removed or changed to adopt the safer defaults. Fallback text must not present provider unavailability as proof of a violation. Missing credentials are identified separately as `login required`, with recovery through `/login typesafe-ai` or `TYPESAFE_API_KEY`.
+
+Credential redaction preserves quoted empty fields and delimiters while withholding nonempty values. A redacted value is not evidence of emptiness or proof of a live credential. Policy questions assess the proposed action, not quoted examples, and claims of testing or an empty environment do not override applicable prohibitions. This remains semantic enforcement, not a comprehensive shell parser or a guarantee against model misclassification.
+
+Scoped maintenance is a separate one-use authorization path, not a fail-open policy setting. `/policy maintenance` shows the last eligible assessed-uncertain project-local install/link or plugin-lockfile proposal; `/policy maintenance approve <action-id>` binds one identical retry to its full input digest, session, project, and snapshot. `/policy maintenance revoke` clears it. Only the exact supported install/link commands and project-local `plugin/omp-plugins.lock.json` object writes qualify. Local or semantic denials, incomplete intent, and unavailable evaluation cannot be approved through this flow. The retry still undergoes evaluation; there is no offline hard-policy bypass. See [Policy Tuning](tuning.md#scoped-maintenance-not-a-policy-bypass) for the operator procedure.
 
 ## Session presentation
 
@@ -143,16 +147,26 @@ Non-allow decisions emit durable session feedback before host enforcement or con
 
 ## Enforced OMP surfaces
 
-- registered tool calls through `tool_call`, with outcomes observed through `tool_result`;
+- enabled registered tool calls through `tool_call`, with outcomes observed through `tool_result`;
 - direct `!` shell and `$` Python execution through `user_bash` and `user_python`;
 - OMP utility slash commands intentionally bypass semantic evaluation so login, model, session, and configuration recovery remain available;
-- project workflow completion through `session_stop`, limited to one continuation per turn;
+- project workflow completion through `session_stop`, limited to one continuation per turn; a repeated stop after that continuation bypasses evaluation;
 - unrestricted child sessions when OMP propagates the extension.
 
-Registered tool-call coverage is configurable without changing the defaults. Empty `enabledToolCalls` and `disabledToolCalls` values evaluate every registered tool call. A non-empty `enabledToolCalls` value is a comma-separated exact-name allowlist; calls outside it bypass semantic evaluation. `disabledToolCalls` is a comma-separated exact-name denylist for evaluation and takes precedence when a name appears in both settings. These settings affect registered `tool_call` events only; direct `!` shell, `$` Python, and workflow gates remain independently enforced.
+Registered tool-call remote coverage defaults to `bash,eval,python,write,edit,task,hub,browser,computer,debug`. Routine inspection and bookkeeping (`glob`, `lsp`, `read`, `grep`, `todo`, `ask`, and `web_search`) skip semantic evaluation unless explicitly enabled. Custom and MCP tool names also require explicit inclusion. Grounded local read/write path prohibitions run even for filtered calls; this does not provide semantic coverage for arbitrary excluded-tool behavior. In particular, excluded LSP operations may mutate sources beyond locally represented targets.
+
+`enabledToolCalls` is a comma-separated exact-name remote-evaluation allowlist; add `glob` to the list to enable its semantic checks. An explicitly empty value evaluates every registered tool call remotely when needed. `disabledToolCalls` takes precedence when a name appears in both settings, without disabling grounded local path checks. Existing explicit settings, including an empty all-tools allowlist, are preserved. These settings affect registered `tool_call` events only; direct `!` shell, `$` Python, and workflow gates remain independently enforced.
+
+Native `lsp` and `write` to the exact device path `xd://lsp` share the `lsp` coverage setting. Routed calls retain their actual `write` host provenance, but enabling or disabling `write` does not change LSP coverage. Ordinary file writes and other device paths still follow `write` coverage.
+
+Actions without applicable rules already skip semantic evaluation. Do not cache decisions solely by command text: policy snapshots, authorization, and external state can change between otherwise identical actions.
 
 Broad shells and restricted children remain dispatch-gated: their enclosing action is checked, but nested effects cannot be intercepted individually.
 
 ## Threat boundary
 
 The plugin can enforce only at events the host emits before effects. It cannot provide process containment after allowing arbitrary shell or evaluation code. It also cannot defend against a malicious trusted project extension executing outside registered tool calls. Coverage must therefore be reported per surface and never described as a sandbox.
+
+## Feedback and promotion
+
+Use [Policy Tuning](tuning.md) to freeze rule-derived expectations, run paired repeated probes, diagnose context/coverage/local/model/threshold/provider failures, and promote only versioned evidence. The opt-in live runner invokes real runtime handlers with TypeSafe in disposable fixtures but never executes proposed tool bodies. Native OMP smoke checks exercise only harmless local actions and establish separate host-integration evidence. Neither corpus results nor parent-task dispatch checks establish containment of restricted children or arbitrary nested effects.

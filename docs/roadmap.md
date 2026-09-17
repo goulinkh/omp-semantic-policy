@@ -6,13 +6,14 @@ The marketplace plugin now includes:
 
 - provider-independent actions, decisions, instruction sources, snapshots, audits, and policy-model contracts;
 - canonical nearest-worktree identity, Git-root-bounded discovery, nested-repository exclusion, symlink canonicalization, and subtree applicability;
-- deterministic compilation with provenance, precedence, content-addressed snapshot identity, and explicit compiler/model/question/threshold versions;
-- profile-scoped SQLite migrations, projects, immutable snapshots, consent, stale transitions, and redacted audits;
-- TypeSafe SDK integration, models-list validation, redacted request construction, thresholded decisions, `jev-latest` selection, and conservative provider fallback;
-- automatic onboarding plus `/policy status`, `/policy coverage`, `/policy onboard`, `/policy review`, and `/policy consent`;
-- pre-effect gates for registered tools, direct shell, direct Python, and session-stop workflow checks;
-- outcome recording through `tool_result`, current-turn authorization capture, and policy-source stale/recompile behavior;
-- automated contract/integration tests and a credential-gated real-provider project end-to-end.
+- deterministic compilation with heading/phase context, provenance, precedence, content-addressed snapshot identity, and explicit compiler/model/question/threshold versions;
+- profile-scoped SQLite migrations, projects, immutable snapshots, consent, stale transitions, and redacted audits with separate raw-provider, adapter, and final-enforcement diagnostics;
+- TypeSafe SDK integration, models-list validation, complete redacted context, thresholded decisions, `jev-latest` selection with resolved-model diagnostics, and explicit unassessed provider fallback;
+- automatic onboarding plus `/policy status`, `/policy coverage`, `/policy onboard`, `/policy review`, `/policy audit [1–100]`, and `/policy consent`;
+- pre-effect gates for registered tools, direct shell, direct Python, and session-stop workflow checks, with grounded local path protections before remote-coverage filtering;
+- outcome recording through `tool_result`, request-scoped current-turn context, digest-bound exact-action authorization, and policy-source stale/recompile behavior;
+- one-use scoped maintenance review/approval/revocation without hard-policy or availability bypass;
+- automated contract/integration tests, a credential-gated real-provider project end-to-end, and an opt-in live tuning runner that suppresses every proposed tool effect.
 
 The remaining coverage limit is imposed by OMP 18.1.19: restricted children remove extensions, and broad shell/evaluation calls expose dispatch but not every nested effect. `/policy coverage` labels both cases explicitly.
 
@@ -33,7 +34,7 @@ Acceptance: the policy module compiles without importing OMP and a host adapter 
 - Add or upstream secret prompt metadata so key input is masked.
 - Require and persist one-time profile consent for instruction egress.
 
-Acceptance: login survives restart in the selected OMP profile; logout removes it; validation performs no paid inference; the extension never requests a secret through OMP's unmasked prompt.
+Acceptance: login survives restart in the selected OMP profile; logout removes it; validation performs no paid inference. Secret prompt metadata remains an upstream goal: OMP 18.1.19 direct token input must not be assumed masked. Use a private terminal or trusted environment injection, never a recorded tuning transcript.
 
 ## Phase 3: project discovery and state
 
@@ -49,9 +50,9 @@ Acceptance: parent instructions above the Git root are excluded, nested reposito
 
 - Parse sources with provenance and precedence.
 - Classify hard requirements, workflow obligations, advisory preferences, and unclassified semantic statements.
-- Run deterministic applicability checks before semantic evaluation.
-- Add the TypeSafe policy-model adapter, redaction, thresholding, and cached client reuse.
-- Record the selected backend plus compiler/question/threshold versions in snapshots.
+- Run deterministic applicability and grounded local literal-path checks before semantic evaluation, preserving conditions, exceptions, and cross-cutting prohibitions.
+- Add the TypeSafe policy-model adapter, redaction, thresholding, and cached client reuse; keep complete relevant context together or return unassessed at the context limit.
+- Record the selected backend plus compiler/question/threshold versions in snapshots, resolved models in diagnostics, and actual matched rules separately from applicable candidates.
 
 Acceptance: applicable instructions receive a provider decision; ambiguity follows the configured automatic default or confirmation threshold; provider failure follows the documented availability behavior.
 
@@ -61,18 +62,19 @@ Acceptance: applicable instructions receive a provider decision; ambiguity follo
 - Record outcomes through `tool_result`.
 - Gate direct shell and Python through `user_bash` and `user_python`.
 - Leave host-owned utility slash commands outside policy evaluation so recovery operations such as `/login` cannot deadlock behind the evaluator they repair.
-- Capture user authorization in `before_agent_start`.
+- Capture request-scoped current-turn context in `before_agent_start`; reserve explicit exact-action authorization for digest-bound direct actions and validated one-use maintenance grants.
 - Gate `task` dispatch and preserve child-session lineage.
 - Check workflow obligations at session stop.
 
-Acceptance: every registered tool in the main session and an unrestricted subagent is seen before execution; restricted children are visibly labeled dispatch-only.
+Acceptance: enabled registered tools in the main session and unrestricted subagents are evaluated before execution; routine inspection skips remote evaluation by default while grounded local path protections remain active, explicit remote-coverage settings are honored, and restricted children are visibly labeled dispatch-only.
 
 ## Phase 6: coverage and operator UX
 
-- Implement `/policy status`, `/policy coverage`, `/policy onboard`, and review flows.
+- Implement `/policy status`, `/policy coverage`, `/policy onboard`, review, and `/policy audit [1–100]`.
 - Report enforced, dispatch-gated, advisory, and uncovered surfaces for the active session.
 - Use OMP status and notification APIs for onboarding and degraded-state messages.
-- Produce redacted audit records explaining the policy clauses and evidence behind decisions.
+- Produce redacted audit records separating raw provider evidence, adapter thresholds, final confirmation, actual rule matches, and source provenance.
+- Offer exact one-use maintenance review/approval/revocation only for eligible uncertain project-local proposals; keep hard denials, incomplete intent, and unavailable evaluation blocking.
 - Never silently rewrite native OMP approval configuration.
 
 Acceptance: unsupported or bypassable surfaces cannot appear as enforced, and remote-provider loss is immediately visible.
@@ -88,6 +90,10 @@ Verification exercises both adapters and the actual boundaries:
 - `testing/e2e/provider-project.ts` creates and onboards a temporary Git project, validates the live TypeSafe models endpoint, sends one redacted policy evaluation, and reports only decision metadata and usage.
 
 The provider end-to-end requires `TYPESAFE_API_KEY` or `TYPESAFE_API_KEY_FILE`; it is intentionally separate from the default offline test suite.
+
+`testing/e2e/policy-tuning.ts` is a separate opt-in feedback tool, invoked with `bun run tune:policy --live`. It drives real runtime handlers and TypeSafe in disposable fixtures while suppressing all proposed tool execution. It accepts a labeled corpus, repeat count, optional additional stress rules, and an output path, and saves redacted machine-readable evidence. Mismatches and unassessed outcomes fail the run; unavailable denials never count as correct classifications.
+
+Follow [Policy Tuning](tuning.md) for frozen rule-derived labels, paired challengers, repeated development trials, a separate held-out corpus, minimal causal fixes, deterministic regression coverage, safe native smoke, and versioned promotion/rollback. This is a procedure and tooling description, not a claim of new live revalidation. Native OMP observations and handler-runner scores must name the exercised revision and remain separate; no adversarial proposed effect should execute during tuning.
 
 ## Phase 8: upstream OMP PolicyGate
 

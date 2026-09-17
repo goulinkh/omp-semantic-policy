@@ -22,7 +22,7 @@ export interface PolicyRepository {
   getRemoteConsent(): boolean | undefined;
   setRemoteConsent(consented: boolean, occurredAtMs?: number): void;
   appendAudit(record: PolicyAuditRecord): void;
-  listAudits(projectRoot: string): readonly PolicyAuditRecord[];
+  listAudits(projectRoot: string, limit?: number): readonly PolicyAuditRecord[];
   close(): void;
 }
 
@@ -80,6 +80,9 @@ export async function createPolicyRepository(databasePath: string): Promise<Poli
   const listAudits = database.prepare<{ payload_json: string }, [string]>(`
     SELECT payload_json FROM audits WHERE project_root = ? ORDER BY id ASC
   `);
+  const listRecentAudits = database.prepare<{ payload_json: string }, [string, number]>(`
+    SELECT payload_json FROM audits WHERE project_root = ? ORDER BY id DESC LIMIT ?
+  `);
 
   return {
     touchProject(projectRoot, occurredAtMs = Date.now()) {
@@ -135,10 +138,15 @@ export async function createPolicyRepository(databasePath: string): Promise<Poli
         JSON.stringify(record),
       );
     },
-    listAudits(projectRoot) {
-      return listAudits
-        .all(projectRoot)
-        .map((row) => JSON.parse(row.payload_json) as PolicyAuditRecord);
+    listAudits(projectRoot, limit) {
+      if (limit !== undefined && (!Number.isSafeInteger(limit) || limit < 1)) {
+        throw new RangeError("Audit limit must be a positive safe integer.");
+      }
+      const rows =
+        limit === undefined
+          ? listAudits.all(projectRoot)
+          : listRecentAudits.all(projectRoot, limit).reverse();
+      return rows.map((row) => JSON.parse(row.payload_json) as PolicyAuditRecord);
     },
     close() {
       database.close();

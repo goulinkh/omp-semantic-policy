@@ -50,6 +50,24 @@ describe("policy persistence", () => {
     expect((await stat(join(directory, "private"))).mode & 0o777).toBe(0o700);
   });
 
+  test("returns only the latest requested audits in project-local chronological order", async () => {
+    const repository = await createPolicyRepository(":memory:");
+    const snapshot = createSnapshot("project-a");
+    const other = { ...createSnapshot("project-b"), projectRoot: "/workspace/other" };
+    repository.saveSnapshot(snapshot);
+    repository.saveSnapshot(other);
+    for (const actionId of ["oldest", "middle", "newest"]) {
+      repository.appendAudit({ ...createAudit(snapshot), actionId });
+      repository.appendAudit({ ...createAudit(other), actionId: `other-${actionId}` });
+    }
+    expect(repository.listAudits(snapshot.projectRoot, 2).map((audit) => audit.actionId)).toEqual([
+      "middle",
+      "newest",
+    ]);
+    expect(() => repository.listAudits(snapshot.projectRoot, 0)).toThrow(RangeError);
+    repository.close();
+  });
+
   test("applies migrations idempotently", () => {
     const database = new Database(":memory:", { strict: true });
     applyPolicyDatabaseMigrations(database);

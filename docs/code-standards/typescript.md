@@ -69,7 +69,7 @@ Expected policy outcomes use result values, not exceptions:
 
 Throw only for broken invariants or infrastructure failures that the current layer cannot represent. Preserve the original cause when wrapping errors. Convert errors into redacted operator messages at the OMP adapter boundary.
 
-Never catch and silently allow. For write, execute, delegation, or unknown operations, an unavailable semantic decision follows the configured automatic confirmation default; interactive prompting occurs only when the configured threshold enables it, and headless prompts deny.
+Never catch and silently allow. An unavailable semantic decision follows the configured automatic confirmation default (`deny` unless explicitly configured otherwise); this is a recorded fallback, not a violation judgment. Default threshold `1` disables dialogs. Interactive prompting is opt-in through a threshold below `1`, and headless prompts deny. Explicit policy denials must not be weakened by the automatic confirmation default.
 
 ## Async and lifecycle
 

@@ -35,6 +35,15 @@ export interface HostAction {
   };
 }
 
+/** Selected dispatch facts, never an unrestricted copy of host tool input. */
+export type PolicyActionDetail =
+  | string
+  | number
+  | boolean
+  | null
+  | readonly PolicyActionDetail[]
+  | { readonly [key: string]: PolicyActionDetail };
+
 /** Provider-independent description of an action before its side effect. */
 export interface PolicyAction {
   readonly id: string;
@@ -43,6 +52,9 @@ export interface PolicyAction {
   readonly workingDirectory: string;
   readonly operation: PolicyOperation;
   readonly interception: InterceptionCapability;
+  /** False when dispatch intent is missing, malformed, unsupported, or exceeds evidence bounds. */
+  readonly complete: boolean;
+  readonly details: Readonly<Record<string, PolicyActionDetail>>;
   readonly targets: readonly PolicyTarget[];
   readonly hostAction: HostAction;
 }
@@ -50,6 +62,8 @@ export interface PolicyAction {
 export interface AuthorizationEnvelope {
   readonly source: "current-turn" | "standing-policy" | "none";
   readonly explicit: boolean;
+  readonly scope?: "request" | "exact-action";
+  readonly actionDigest?: string;
   readonly summary?: string;
 }
 

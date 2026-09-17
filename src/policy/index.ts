@@ -3,6 +3,7 @@ export type {
   HostAction,
   InterceptionCapability,
   PolicyAction,
+  PolicyActionDetail,
   PolicyActor,
   PolicyActorKind,
   PolicyEvaluationContext,
@@ -21,6 +22,8 @@ export {
 } from "./compiler/compilePolicySnapshot.js";
 export type {
   DecisionEvidence,
+  PolicyConfirmationDiagnostics,
+  PolicyDecisionDiagnostics,
   PolicyDecision,
   PolicyDecisionDraft,
   PolicyEvidenceSource,
@@ -35,6 +38,8 @@ export {
 } from "./gate/createPolicyGate.js";
 export type {
   PolicyModel,
+  PolicyModelDiagnostics,
+  PolicyModelUnavailableReason,
   PolicyModelRequest,
   PolicyModelResult,
   PolicyModelUsage,
@@ -46,6 +51,9 @@ export type {
   CompiledPolicyRule,
   InstructionSource,
   InstructionSourceKind,
+  LocalPathProhibition,
+  PolicyRuleApplicability,
   PolicyRuleClass,
 } from "./sources/types.js";
 export { selectApplicableSources } from "./sources/selectApplicableSources.js";
+export { selectApplicableRules } from "./sources/selectApplicableRules.js";

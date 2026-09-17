@@ -46,7 +46,7 @@
           "approve"
         ],
         "default": "deny",
-        "description": "Automatically deny or approve confirmation requests that remain below the configured confirmation threshold."
+        "description": "Resolve confirmation requests when no dialog is shown. Deny (default) blocks unapproved actions; approve explicitly opts into fail-open behavior. Explicit policy denials remain blocked."
       },
       "confirmationThreshold": {
         "type": "number",
@@ -54,17 +54,17 @@
         "min": 0,
         "max": 1,
         "step": 0.05,
-        "description": "Ask for confirmation at or above this confidence. Set 0 to ask for every confirmation request; the default 1 disables dialogs."
+        "description": "The default 1 keeps decisions automatic without dialogs. Set below 1 to opt into prompting at or above this confidence; 0 prompts for every uncertain checked action. Other requests use confirmationDefault; prompts block without an interactive UI."
       },
       "enabledToolCalls": {
         "type": "string",
-        "default": "",
-        "description": "Comma-separated exact OMP tool names to evaluate. Empty evaluates every tool call; use this as an allowlist when only selected tools need checks."
+        "default": "bash,eval,python,write,edit,task,hub,browser,computer,debug",
+        "description": "Comma-separated exact OMP tool names for remote semantic evaluation. Defaults to mutation, execution, delegation, and process-control tools; routine inspection and lsp (including write to xd://lsp) skip TypeSafe. Local path protections and intent checks remain active. Explicitly empty evaluates every tool call."
       },
       "disabledToolCalls": {
         "type": "string",
         "default": "",
-        "description": "Comma-separated exact OMP tool names that bypass semantic policy evaluation, for example bash. Empty keeps all current enforcement defaults."
+        "description": "Comma-separated exact OMP tool names that skip remote semantic evaluation, for example bash. Local protections remain active. Empty keeps all current remote enforcement defaults."
       }
     }
   },

@@ -1,9 +1,45 @@
+import type { PolicyModelDiagnostics } from "../models/types.js";
+
 export type PolicyEvidenceSource = "deterministic" | "semantic" | "fallback";
+
+export interface PolicyConfirmationDiagnostics {
+  readonly resolution:
+    | "not-required"
+    | "pending"
+    | "automatic-approve"
+    | "automatic-deny"
+    | "maintenance-approved"
+    | "user-approved"
+    | "user-denied"
+    | "headless-denied";
+  readonly confidence?: number;
+}
+
+/** Persistence-safe explanation of the provider, adapter, and final enforcement stages. */
+export interface PolicyDecisionDiagnostics {
+  readonly path:
+    | "local-denial"
+    | "coverage-bypass"
+    | "no-applicable-rules"
+    | "semantic"
+    | "provider-unavailable"
+    | "incomplete-action";
+  readonly semantic?: PolicyModelDiagnostics;
+  readonly decisiveRule?: {
+    readonly ruleId: string;
+    readonly sourceId: string;
+    readonly sourcePath?: string;
+  };
+  readonly confirmation: PolicyConfirmationDiagnostics;
+  readonly enforcedEffect: "allow" | "prompt" | "deny" | "revise";
+}
 
 export interface DecisionEvidence {
   readonly evaluatorId: string;
   readonly source: PolicyEvidenceSource;
   readonly ruleIds: readonly string[];
+  readonly applicableRuleIds?: readonly string[];
+  readonly diagnostics?: PolicyDecisionDiagnostics;
 }
 
 export type PolicyDecision =

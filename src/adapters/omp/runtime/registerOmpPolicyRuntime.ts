@@ -18,6 +18,7 @@ import type {
   PolicySnapshot,
 } from "../../../policy/index.js";
 import { actionMayMutatePolicySources } from "../../../policy/index.js";
+import { selectShellPayloadFacts } from "../../../policy/actions/shellArguments.js";
 import {
   createTypeSafePolicyModel,
   DEFAULT_TYPESAFE_POLICY_MODEL,
@@ -42,9 +43,15 @@ import {
 } from "../onboarding/index.js";
 import { createPolicyRepository, type PolicyRepository } from "../persistence/index.js";
 import { evaluateSnapshotPolicy } from "../enforcement/evaluateSnapshotPolicy.js";
+import { bindRequestAuthorization } from "../enforcement/bindRequestAuthorization.js";
+import {
+  createMaintenanceApprovals,
+  digestPolicyAction,
+} from "../enforcement/maintenanceApprovals.js";
 import { POLICY_LOGO, POLICY_NAME, brandPolicyText } from "../policyIdentity.js";
 import { createDefaultModelStandardsCompletion } from "./createDefaultModelStandardsCompletion.js";
 import {
+  DEFAULT_ENABLED_TOOL_CALLS,
   createPolicyStatusBarController,
   formatPolicyDecisionFeedback,
   stylePolicyDecisionFeedback,
@@ -91,8 +98,10 @@ export function registerOmpPolicyRuntime(
   );
   const toolInfoByName = new Map<string, ToolInfo>();
   const pendingActions = new Map<string, PendingAction>();
+  const maintenance = createMaintenanceApprovals();
   let activeProjectRoot: string | undefined;
   let authorization: AuthorizationEnvelope | undefined;
+  let originalRequest: string | undefined;
   let consentPromptActive = false;
   let lastContinuationTurn: number | undefined;
   let cachedModel: { readonly apiKey: string; readonly model: PolicyModel } | undefined;
@@ -105,11 +114,11 @@ export function registerOmpPolicyRuntime(
     showViolationFeedback: true,
     confirmationDefault: "deny",
     disabledToolCalls: [],
-    enabledToolCalls: [],
+    enabledToolCalls: DEFAULT_ENABLED_TOOL_CALLS,
     confirmationThreshold: 1,
   };
   let disabledToolCallNames = new Set<string>();
-  let enabledToolCallNames = new Set<string>();
+  let enabledToolCallNames = new Set(runtimeSettings.enabledToolCalls);
   let manualOnboardingRunning = false;
   let onboardingQueue: Promise<void> = Promise.resolve();
   const statusBarController = createPolicyStatusBarController();
@@ -153,7 +162,7 @@ export function registerOmpPolicyRuntime(
       try {
         const consented = await context.ui.confirm(
           POLICY_NAME,
-          "Allow redacted policy rules, action metadata, and current-turn authorization summaries to be evaluated by TypeSafe AI? Raw tool inputs are never sent.",
+          "Allow redacted policy rules, selected action details, and current-turn requests to be evaluated by TypeSafe AI? Credentials are redacted before transmission.",
         );
         repository.setRemoteConsent(consented);
       } finally {
@@ -182,7 +191,11 @@ export function registerOmpPolicyRuntime(
   ): Promise<{ readonly repository: PolicyRepository; readonly snapshot?: PolicySnapshot }> {
     const repository = await repositoryPromise;
     const highImpact = operation !== "read" && operation !== "workflow" && operation !== "internal";
-    if (activeProjectRoot === undefined || highImpact) {
+    if (
+      activeProjectRoot === undefined ||
+      highImpact ||
+      repository.getProject(activeProjectRoot)?.stale
+    ) {
       await onboard(context);
     }
     const snapshot =
@@ -222,7 +235,9 @@ export function registerOmpPolicyRuntime(
           hasConsent: () => repository.getRemoteConsent() === true,
           onError: (error) => {
             logger.warn("TypeSafe policy evaluation failed", {
-              error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+              error: redactText(
+                error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+              ),
             });
           },
         });
@@ -240,21 +255,33 @@ export function registerOmpPolicyRuntime(
     context: ExtensionContext,
     signal?: AbortSignal,
     explicitAuthorization = authorization,
+    semanticEnabled = true,
   ): Promise<{ readonly decision: PolicyDecision; readonly snapshot?: PolicySnapshot }> {
     const { repository, snapshot } = await ensureSnapshot(context, action.operation);
-    const model =
-      snapshot === undefined ? undefined : await resolvePolicyModel(context, repository, signal);
+    const maintenanceApproved =
+      snapshot !== undefined && (await maintenance.consume(action, snapshot));
+    const boundAuthorization = maintenanceApproved
+      ? currentTurnAuthorization(action)
+      : bindRequestAuthorization(action, explicitAuthorization, originalRequest);
+    let modelRequested = false;
+    let model: PolicyModel | undefined;
     const evaluatedDecision = await evaluateSnapshotPolicy({
       action,
       context: {
         headless: !context.hasUI,
-        ...(explicitAuthorization === undefined ? {} : { authorization: explicitAuthorization }),
+        ...(boundAuthorization === undefined ? {} : { authorization: boundAuthorization }),
         ...(snapshot === undefined
           ? {}
           : { snapshot: { projectRoot: snapshot.projectRoot, snapshotId: snapshot.id } }),
       },
       ...(snapshot === undefined ? {} : { snapshot }),
-      ...(model === undefined ? {} : { model }),
+      resolveModel: async () => {
+        modelRequested = true;
+        model = await resolvePolicyModel(context, repository, signal);
+        return model;
+      },
+      semanticEnabled,
+      maintenanceApproved,
       ...(signal === undefined ? {} : { signal }),
       confirmation: {
         defaultAction: runtimeSettings.confirmationDefault,
@@ -263,12 +290,12 @@ export function registerOmpPolicyRuntime(
     });
     if (repository.getRemoteConsent() !== true) {
       semanticEvaluatorState = "disabled";
-    } else if (model === undefined) {
+    } else if (modelRequested && model === undefined) {
       semanticEvaluatorState =
         semanticEvaluatorIssue === "login-required" ? "login-required" : "unavailable";
-    } else if (evaluatedDecision.evidence.source !== "fallback") {
+    } else if (modelRequested && evaluatedDecision.evidence.source !== "fallback") {
       semanticEvaluatorState = "available";
-    } else {
+    } else if (modelRequested) {
       semanticEvaluatorState = "unavailable";
       semanticEvaluatorIssue = "evaluation-failed";
     }
@@ -278,10 +305,43 @@ export function registerOmpPolicyRuntime(
     if (runtimeSettings.showViolationFeedback && context.hasUI && feedback !== undefined) {
       context.ui.notify(stylePolicyDecisionFeedback(feedback, decision, context.ui.theme), "info");
     }
-    if (activeProjectRoot !== undefined) {
-      repository.appendAudit(createDecisionAudit(activeProjectRoot, action, decision, snapshot));
-    }
     return { decision, ...(snapshot === undefined ? {} : { snapshot }) };
+  }
+
+  async function recordDecision(
+    action: PolicyAction,
+    decision: PolicyDecision,
+    snapshot: PolicySnapshot | undefined,
+    context: ExtensionContext,
+    blocked: boolean,
+  ): Promise<void> {
+    const settled = settleConfirmation(decision, context.hasUI, blocked);
+    const projectRoot = snapshot?.projectRoot ?? activeProjectRoot;
+    if (projectRoot !== undefined) {
+      (await repositoryPromise).appendAudit(
+        createDecisionAudit(projectRoot, action, settled, snapshot),
+      );
+    }
+    if (
+      blocked &&
+      snapshot !== undefined &&
+      decision.evidence.diagnostics?.path === "semantic" &&
+      decision.evidence.diagnostics.semantic?.adapterEffect === "prompt"
+    ) {
+      await maintenance.remember(action, snapshot);
+      if (
+        maintenance.current()?.actionId === action.id &&
+        context.hasUI &&
+        runtimeSettings.showViolationFeedback
+      ) {
+        context.ui.notify(
+          brandPolicyText(
+            "For an exact maintenance retry, inspect /policy maintenance. Hard denials and unavailable evaluation remain blocking.",
+          ),
+          "info",
+        );
+      }
+    }
   }
 
   function startManualOnboarding(context: ExtensionContext): void {
@@ -352,6 +412,14 @@ export function registerOmpPolicyRuntime(
   }
 
   async function initialize(context: ExtensionContext): Promise<void> {
+    lastContinuationTurn = undefined;
+    activeProjectRoot = undefined;
+    authorization = undefined;
+    originalRequest = undefined;
+    semanticEvaluatorState = undefined;
+    semanticEvaluatorIssue = undefined;
+    pendingActions.clear();
+    maintenance.clear();
     runtimeSettings = await loadPolicyRuntimeSettings(context.cwd, options.runtimeSettings);
     disabledToolCallNames = new Set(runtimeSettings.disabledToolCalls);
     enabledToolCallNames = new Set(runtimeSettings.enabledToolCalls);
@@ -373,10 +441,12 @@ export function registerOmpPolicyRuntime(
   pi.on("session_switch", async (_event, context) => initialize(context));
 
   pi.on("before_agent_start", async (event, context) => {
+    originalRequest = event.prompt;
     authorization = {
       source: "current-turn",
-      explicit: true,
-      summary: redactText(event.prompt).slice(0, 1_000),
+      explicit: false,
+      scope: "request",
+      summary: redactText(event.prompt),
     };
     runtimeSystemPrompt = event.systemPrompt;
     try {
@@ -387,18 +457,24 @@ export function registerOmpPolicyRuntime(
   });
 
   pi.on("tool_call", async (event, context) => {
-    if (
-      disabledToolCallNames.has(event.toolName) ||
-      (enabledToolCallNames.size > 0 && !enabledToolCallNames.has(event.toolName))
-    ) {
-      return;
-    }
+    const coverageToolName =
+      event.toolName === "write" && event.input.path === "xd://lsp" ? "lsp" : event.toolName;
+    const semanticEnabled =
+      !disabledToolCallNames.has(coverageToolName) &&
+      (enabledToolCallNames.size === 0 || enabledToolCallNames.has(coverageToolName));
     const action = normalizeOmpToolCall(event, context, {
       toolInfo: findToolInfo(pi, toolInfoByName, event.toolName),
     });
-    const { decision, snapshot } = await evaluateAction(action, context);
+    const { decision, snapshot } = await evaluateAction(
+      action,
+      context,
+      undefined,
+      authorization,
+      semanticEnabled,
+    );
     pendingActions.set(action.id, { action, ...(snapshot === undefined ? {} : { snapshot }) });
     const result = await applyOmpToolDecision(decision, context);
+    await recordDecision(action, decision, snapshot, context, result?.block === true);
     if (result?.block === true) {
       await recordOutcome(action, snapshot, context, "blocked");
       pendingActions.delete(action.id);
@@ -437,14 +513,16 @@ export function registerOmpPolicyRuntime(
       context.sessionManager.getSessionId(),
       "user_bash",
     );
-    const directAuthorization = currentTurnAuthorization(event.command);
+    const directAuthorization = currentTurnAuthorization(action);
     const { decision, snapshot } = await evaluateAction(
       action,
       context,
       undefined,
       directAuthorization,
     );
-    if (await decisionAllowsExecution(decision, context)) {
+    const allowed = await decisionAllowsExecution(decision, context);
+    await recordDecision(action, decision, snapshot, context, !allowed);
+    if (allowed) {
       return;
     }
     await recordOutcome(action, snapshot, context, "blocked");
@@ -459,14 +537,16 @@ export function registerOmpPolicyRuntime(
       context.sessionManager.getSessionId(),
       "user_python",
     );
-    const directAuthorization = currentTurnAuthorization(event.code);
+    const directAuthorization = currentTurnAuthorization(action);
     const { decision, snapshot } = await evaluateAction(
       action,
       context,
       undefined,
       directAuthorization,
     );
-    if (await decisionAllowsExecution(decision, context)) {
+    const allowed = await decisionAllowsExecution(decision, context);
+    await recordDecision(action, decision, snapshot, context, !allowed);
+    if (allowed) {
       return;
     }
     await recordOutcome(action, snapshot, context, "blocked");
@@ -474,6 +554,9 @@ export function registerOmpPolicyRuntime(
   });
 
   pi.on("session_stop", async (event, context) => {
+    if (lastContinuationTurn === event.turn_id) {
+      return;
+    }
     const action: PolicyAction = {
       id: `session-stop:${event.session_id}:${event.turn_id}`,
       occurredAtMs: Date.now(),
@@ -482,10 +565,14 @@ export function registerOmpPolicyRuntime(
       operation: "workflow",
       interception: "precise",
       targets: [],
+      complete: true,
+      details: { event: "session_stop" },
       hostAction: { host: "omp", name: "session_stop", input: {} },
     };
-    const { decision } = await evaluateAction(action, context, event.signal);
-    if (decision.effect === "allow" || lastContinuationTurn === event.turn_id) {
+    const { decision, snapshot } = await evaluateAction(action, context, event.signal);
+    const allowed = await decisionAllowsExecution(decision, context);
+    await recordDecision(action, decision, snapshot, context, !allowed);
+    if (allowed) {
       return;
     }
     lastContinuationTurn = event.turn_id;
@@ -496,7 +583,7 @@ export function registerOmpPolicyRuntime(
     description: `${POLICY_LOGO} Onboard, inspect, or configure semantic policy`,
     getArgumentCompletions: getPolicyArgumentCompletions,
     handler: async (args, context) => {
-      const { command, value } = parsePolicyCommandArguments(args);
+      const { command, value, actionId } = parsePolicyCommandArguments(args);
       if (command === "coverage") {
         context.ui.notify(formatCoverageReport(), "info");
       } else if (command === "onboard") {
@@ -504,6 +591,57 @@ export function registerOmpPolicyRuntime(
       } else if (command === "review") {
         const repository = await repositoryPromise;
         context.ui.notify(formatProjectPolicyReview(repository, activeProjectRoot), "info");
+      } else if (command === "audit") {
+        const limit = value === undefined ? 10 : Number(value);
+        if (!Number.isSafeInteger(limit) || limit < 1 || limit > 100) {
+          context.ui.notify(brandPolicyText("Usage: /policy audit [1–100]"), "warning");
+          return;
+        }
+        const repository = await repositoryPromise;
+        const records =
+          activeProjectRoot === undefined ? [] : repository.listAudits(activeProjectRoot, limit);
+        context.ui.notify(
+          brandPolicyText(`Recent redacted audit records:\n${JSON.stringify(records, null, 2)}`),
+          "info",
+        );
+      } else if (command === "maintenance") {
+        if (value === "revoke") {
+          maintenance.clear();
+          context.ui.notify(brandPolicyText("Maintenance authorization cleared."), "info");
+        } else if (value === "approve" && actionId !== undefined) {
+          await onboard(context);
+          const repository = await repositoryPromise;
+          const snapshot =
+            activeProjectRoot === undefined
+              ? undefined
+              : repository.getActiveSnapshot(activeProjectRoot);
+          const approved =
+            snapshot !== undefined &&
+            maintenance.approve(actionId, snapshot, context.sessionManager.getSessionId());
+          context.ui.notify(
+            brandPolicyText(
+              approved
+                ? "Approved one identical maintenance retry in this session and snapshot. Hard denials, incomplete intent, and unavailable evaluation still block."
+                : "No matching maintenance candidate. Inspect /policy maintenance; changed policy requires a new denied proposal.",
+            ),
+            approved ? "info" : "warning",
+          );
+        } else if (value === undefined) {
+          const candidate = maintenance.current();
+          context.ui.notify(
+            brandPolicyText(
+              candidate === undefined
+                ? "No pending maintenance candidate. Only uncertain project-local install/link or plugin lockfile writes qualify."
+                : `${candidate.summary}\nAction ID: ${candidate.actionId}\nInput digest: ${candidate.digest}\nSnapshot: ${candidate.snapshotId}\nReview the original tool input, then /policy maintenance approve ${candidate.actionId}. One exact retry only; no hard-policy or availability bypass.`,
+            ),
+            "info",
+          );
+        } else {
+          context.ui.notify(
+            brandPolicyText("Usage: /policy maintenance [approve <action-id>|revoke]"),
+            "warning",
+          );
+        }
       } else if (command === "consent" && (value === "on" || value === "off")) {
         const repository = await repositoryPromise;
         repository.setRemoteConsent(value === "on");
@@ -523,7 +661,9 @@ export function registerOmpPolicyRuntime(
         );
       } else {
         context.ui.notify(
-          brandPolicyText("Usage: /policy [status|review|coverage|onboard|consent on|consent off]"),
+          brandPolicyText(
+            "Usage: /policy [status|review|coverage|onboard|audit [1–100]|maintenance [approve <action-id>|revoke]|consent on|consent off]",
+          ),
           "warning",
         );
       }
@@ -587,6 +727,12 @@ function createDecisionAudit(
     evaluatorId: decision.evidence.evaluatorId,
     evidenceSource: decision.evidence.source,
     ruleIds: decision.evidence.ruleIds,
+    ...(decision.evidence.applicableRuleIds === undefined
+      ? {}
+      : { applicableRuleIds: decision.evidence.applicableRuleIds }),
+    ...(decision.evidence.diagnostics === undefined
+      ? {}
+      : { diagnostics: decision.evidence.diagnostics }),
   };
 }
 
@@ -594,12 +740,45 @@ function summarizeTargets(action: PolicyAction): readonly string[] {
   return action.targets.map((target) => `${target.kind}:${redactText(target.value).slice(0, 200)}`);
 }
 
-function currentTurnAuthorization(summary: string): AuthorizationEnvelope {
+function currentTurnAuthorization(action: PolicyAction): AuthorizationEnvelope {
   return {
     source: "current-turn",
     explicit: true,
-    summary: redactText(summary).slice(0, 1_000),
+    scope: "exact-action",
+    actionDigest: digestPolicyAction(action),
+    summary: "The user directly requested this exact action.",
   };
+}
+
+function settleConfirmation(
+  decision: PolicyDecision,
+  hasUI: boolean,
+  blocked: boolean,
+): PolicyDecision {
+  if (decision.effect !== "prompt") return decision;
+  const effect: "allow" | "deny" = blocked ? "deny" : "allow";
+  const evidence = {
+    ...decision.evidence,
+    ...(decision.evidence.diagnostics === undefined
+      ? {}
+      : {
+          diagnostics: {
+            ...decision.evidence.diagnostics,
+            enforcedEffect: effect,
+            confirmation: {
+              ...decision.evidence.diagnostics.confirmation,
+              resolution: !hasUI
+                ? ("headless-denied" as const)
+                : blocked
+                  ? ("user-denied" as const)
+                  : ("user-approved" as const),
+            },
+          },
+        }),
+  };
+  return blocked
+    ? { effect: "deny", reason: decision.reason, evidence }
+    : { effect: "allow", evidence };
 }
 
 function createDirectAction(
@@ -609,6 +788,7 @@ function createDirectAction(
   sessionId: string,
   hostName: string,
 ): PolicyAction {
+  const shellPayload = targetKind === "command" ? selectShellPayloadFacts(value) : undefined;
   return {
     id: randomUUID(),
     occurredAtMs: Date.now(),
@@ -616,8 +796,10 @@ function createDirectAction(
     workingDirectory,
     operation: "execute",
     interception: "precise",
+    complete: true,
+    details: { [targetKind]: value, ...(shellPayload === undefined ? {} : { shellPayload }) },
     targets: [{ kind: targetKind, value }],
-    hostAction: { host: "omp", name: hostName, input: {} },
+    hostAction: { host: "omp", name: hostName, input: { [targetKind]: value } },
   };
 }
 
@@ -689,11 +871,22 @@ function clarifyUnavailableEvaluator(
 ): PolicyDecision {
   if (
     (decision.effect !== "prompt" && decision.effect !== "deny") ||
-    decision.evidence.source !== "fallback"
+    decision.evidence.source !== "fallback" ||
+    decision.evidence.diagnostics?.path !== "provider-unavailable"
   ) {
     return decision;
   }
   const setup = (() => {
+    switch (decision.evidence.diagnostics?.semantic?.unavailableReason) {
+      case "context-limit":
+        return "Relevant policy exceeds the provider context limit. Inspect sources with /policy review and applicability with /policy audit; no rules were discarded or split.";
+      case "invalid-response":
+        return "TypeSafe returned an invalid decision or rule attribution. Inspect /policy audit before retrying; no compliant assessment is available.";
+      case "missing-snapshot":
+        return "No policy snapshot is available. Open the intended Git project and run /policy onboard.";
+      case "not-consented":
+        return "Remote semantic evaluation is disabled. Run /policy consent on.";
+    }
     switch (issue) {
       case "consent-disabled":
         return "Remote semantic evaluation is disabled. Run /policy consent on.";
@@ -702,7 +895,7 @@ function clarifyUnavailableEvaluator(
       case "credential-resolution-failed":
         return "TypeSafe credential resolution failed. Run /login typesafe-ai to refresh it.";
       case "evaluation-failed":
-        return "TypeSafe policy evaluation failed. Check network access or run /login typesafe-ai.";
+        return "TypeSafe policy evaluation failed. Inspect /policy audit and provider availability; retry only after identifying the failure.";
       case undefined:
         return undefined;
     }

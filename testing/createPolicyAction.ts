@@ -14,6 +14,8 @@ export function createTestPolicyAction(
     workingDirectory: "/workspace/project",
     operation,
     interception,
+    complete: true,
+    details: {},
     targets: [{ kind: "tool", value: "fixture" }],
     hostAction: {
       host: "test",

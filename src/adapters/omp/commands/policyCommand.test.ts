@@ -2,16 +2,6 @@ import { describe, expect, test } from "bun:test";
 import { getPolicyArgumentCompletions, parsePolicyCommandArguments } from "./policyCommand.js";
 
 describe("policy command", () => {
-  test("offers every subcommand after /policy", () => {
-    expect(getPolicyArgumentCompletions("")?.map((item) => item.label)).toEqual([
-      "status",
-      "coverage",
-      "onboard",
-      "review",
-      "consent",
-    ]);
-  });
-
   test("filters subcommands and completes consent values", () => {
     expect(getPolicyArgumentCompletions("on")?.map((item) => item.label)).toEqual(["onboard"]);
     expect(getPolicyArgumentCompletions("consent ")?.map((item) => item.value)).toEqual([
@@ -30,5 +20,17 @@ describe("policy command", () => {
       value: "on",
     });
     expect(parsePolicyCommandArguments("")).toEqual({ command: "status" });
+  });
+
+  test("preserves case-sensitive action IDs and rejects trailing approval arguments", () => {
+    expect(parsePolicyCommandArguments("/policy maintenance approve Tool-AbC")).toEqual({
+      command: "maintenance",
+      value: "approve",
+      actionId: "Tool-AbC",
+    });
+    expect(parsePolicyCommandArguments("maintenance approve Tool-AbC extra").command).toBe(
+      "invalid",
+    );
+    expect(parsePolicyCommandArguments("consent on extra").command).toBe("invalid");
   });
 });

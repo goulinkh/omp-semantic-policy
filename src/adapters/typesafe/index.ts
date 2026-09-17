@@ -5,5 +5,9 @@ export {
   TYPESAFE_THRESHOLD_VERSION,
   type TypeSafePolicyModelOptions,
 } from "./createTypeSafePolicyModel.js";
-export { createRedactedProviderState, redactText } from "./redactProviderState.js";
+export {
+  createRedactedProviderState,
+  redactText,
+  type RedactedProviderState,
+} from "./redactProviderState.js";
 export { registerTypeSafeProvider } from "./registerTypeSafeProvider.js";

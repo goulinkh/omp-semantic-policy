@@ -1,5 +1,5 @@
 import type { InterceptionCapability, PolicyOperation } from "../actions/types.js";
-import type { PolicyEvidenceSource } from "../decisions/types.js";
+import type { PolicyDecisionDiagnostics, PolicyEvidenceSource } from "../decisions/types.js";
 
 export type PolicyAuditPhase = "decision" | "result" | "workflow";
 
@@ -17,5 +17,7 @@ export interface PolicyAuditRecord {
   readonly evaluatorId?: string;
   readonly evidenceSource?: PolicyEvidenceSource;
   readonly ruleIds?: readonly string[];
+  readonly applicableRuleIds?: readonly string[];
+  readonly diagnostics?: PolicyDecisionDiagnostics;
   readonly outcome?: "success" | "error" | "blocked";
 }
