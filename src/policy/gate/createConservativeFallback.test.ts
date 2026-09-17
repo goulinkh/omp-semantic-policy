@@ -5,7 +5,7 @@ import { createConservativeFallback } from "./createConservativeFallback.js";
 const evaluationContext = { headless: false } as const;
 
 describe("createConservativeFallback", () => {
-  it("allows reads before a compiled policy exists", async () => {
+  it("allows reads when semantic policy is unavailable", async () => {
     const decision = await createConservativeFallback().evaluate(
       createTestPolicyAction("read"),
       evaluationContext,
@@ -17,7 +17,7 @@ describe("createConservativeFallback", () => {
     });
   });
 
-  it("requires approval for a write before a compiled policy exists", async () => {
+  it("requires approval for a write when semantic policy is unavailable", async () => {
     const decision = await createConservativeFallback().evaluate(
       createTestPolicyAction("write"),
       evaluationContext,
@@ -25,7 +25,7 @@ describe("createConservativeFallback", () => {
 
     expect(decision).toEqual({
       effect: "prompt",
-      reason: "No compiled policy is active for write action fixture.",
+      reason: "No semantic policy decision is available for write action fixture.",
       ruleIds: ["fallback.prompt-side-effect"],
     });
   });

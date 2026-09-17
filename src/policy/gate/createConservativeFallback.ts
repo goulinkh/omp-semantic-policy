@@ -7,7 +7,7 @@ const NON_MUTATING_OPERATIONS: Readonly<Partial<Record<PolicyOperation, true>>> 
 };
 
 /**
- * Provide safe behavior before a project has a compiled policy snapshot.
+ * Provide safe behavior when compiled/semantic policy cannot decide an action.
  *
  * Reads and local workflow operations continue. Every action capable of an
  * external side effect requires explicit interactive approval and therefore
@@ -23,7 +23,7 @@ export function createConservativeFallback(): PolicyFallbackEvaluator {
 
       return {
         effect: "prompt",
-        reason: `No compiled policy is active for ${action.operation} action ${action.hostAction.name}.`,
+        reason: `No semantic policy decision is available for ${action.operation} action ${action.hostAction.name}.`,
         ruleIds: ["fallback.prompt-side-effect"],
       };
     },

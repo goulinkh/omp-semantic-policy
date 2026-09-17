@@ -11,6 +11,14 @@ export type {
   PolicyTarget,
   PolicyTargetKind,
 } from "./actions/types.js";
+export type { PolicyAuditPhase, PolicyAuditRecord } from "./audits/types.js";
+export {
+  classifyStatement,
+  compilePolicySnapshot,
+  extractStatements,
+  POLICY_COMPILER_VERSION,
+  type CompilePolicySnapshotOptions,
+} from "./compiler/compilePolicySnapshot.js";
 export type {
   DecisionEvidence,
   PolicyDecision,
@@ -25,3 +33,19 @@ export {
   type PolicyGate,
   type PolicyGateOptions,
 } from "./gate/createPolicyGate.js";
+export type {
+  PolicyModel,
+  PolicyModelRequest,
+  PolicyModelResult,
+  PolicyModelUsage,
+  PolicyModelValidation,
+} from "./models/types.js";
+export { actionMayMutatePolicySources } from "./snapshots/staleness.js";
+export type { PolicySnapshot, PolicyVersionTuple } from "./snapshots/types.js";
+export type {
+  CompiledPolicyRule,
+  InstructionSource,
+  InstructionSourceKind,
+  PolicyRuleClass,
+} from "./sources/types.js";
+export { selectApplicableSources } from "./sources/selectApplicableSources.js";
