@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { ExtensionAPI, ProviderConfig } from "@oh-my-pi/pi-coding-agent";
 import type { Fetch } from "@typesafe-ai/sdk";
 import type { PolicyModelRequest, PolicySnapshot } from "../../policy/index.js";
 import { createTestPolicyAction } from "../../../testing/createPolicyAction.js";
@@ -6,6 +7,7 @@ import {
   createTypeSafePolicyModel,
   DEFAULT_TYPESAFE_POLICY_MODEL,
 } from "./createTypeSafePolicyModel.js";
+import { registerTypeSafeProvider } from "./registerTypeSafeProvider.js";
 
 interface CapturedRequest {
   readonly url: string;
@@ -84,6 +86,102 @@ describe("TypeSafe policy model", () => {
     expect(body).not.toContain("super-secret-value");
     expect(body).not.toContain("hostInputSecret");
     expect(body).not.toContain("unrelated-web-rule");
+  });
+
+  test("partitions large policy state without dropping rules", async () => {
+    const captured: CapturedRequest[] = [];
+    const request = createRequest();
+    const rootRule = request.snapshot.rules[0];
+    if (rootRule === undefined) {
+      throw new Error("Root rule fixture is missing");
+    }
+    const rules = Array.from({ length: 320 }, (_, index) => ({
+      ...rootRule,
+      id: `rule-${index}`,
+      statement: `Rule ${index}: ${"bounded policy text ".repeat(18)}`,
+    }));
+    const model = createTypeSafePolicyModel({
+      apiKey: "fixture-key",
+      hasConsent: () => true,
+      fetch: createFetch(captured, {
+        model: DEFAULT_TYPESAFE_POLICY_MODEL,
+        answers: {
+          decision: {
+            type: "choice",
+            choice: "allow",
+            confidence: 0.99,
+            probabilities: { allow: 0.99, prompt: 0.005, deny: 0.005 },
+          },
+          hardViolation: { type: "noul", noul: 0.01 },
+        },
+        usage: { input_tokens: 50, output_tokens: 5 },
+      }),
+    });
+
+    const result = await model.evaluate({
+      ...request,
+      snapshot: { ...request.snapshot, rules },
+    });
+    const sentRuleIds = captured.flatMap(({ body }) => {
+      const payload = JSON.parse(body ?? "{}") as {
+        state?: { policy?: { rules?: Array<{ id?: string }> } };
+      };
+      return (payload.state?.policy?.rules ?? []).flatMap((rule) =>
+        rule.id === undefined ? [] : [rule.id],
+      );
+    });
+
+    expect(captured.length).toBeGreaterThan(1);
+    expect(captured.every(({ body }) => Buffer.byteLength(body ?? "") < 44_000)).toBe(true);
+    expect(sentRuleIds).toEqual(rules.map((rule) => rule.id));
+    expect(result).toMatchObject({
+      kind: "decision",
+      effect: "allow",
+      usage: {
+        inputTokens: captured.length * 50,
+        outputTokens: captured.length * 5,
+      },
+    });
+  });
+
+  test("prompts for a token and returns it for OMP credential persistence", async () => {
+    let providerConfig: ProviderConfig | undefined;
+    const validated: string[] = [];
+    const progress: string[] = [];
+    registerTypeSafeProvider(
+      {
+        registerProvider(name: string, config: ProviderConfig) {
+          expect(name).toBe("typesafe-ai");
+          providerConfig = config;
+        },
+      } as unknown as ExtensionAPI,
+      {
+        validateApiKey: async (apiKey) => {
+          validated.push(apiKey);
+        },
+      },
+    );
+    expect(providerConfig?.apiKey).toBeUndefined();
+    const login = providerConfig?.oauth?.login;
+    if (login === undefined) {
+      throw new Error("TypeSafe login provider was not registered");
+    }
+
+    const credential = await login({
+      onAuth() {},
+      async onPrompt(prompt) {
+        expect(prompt.message).toBe("Paste your TypeSafe API token");
+        expect(prompt.placeholder).toBe("TypeSafe API token");
+        return "  fixture-token  ";
+      },
+      onProgress(message) {
+        progress.push(message);
+      },
+    });
+
+    expect(credential).toBe("fixture-token");
+    expect(validated).toEqual(["fixture-token"]);
+    expect(progress).toEqual(["Validating TypeSafe API token…"]);
   });
 });
 

@@ -1,35 +1,34 @@
 import { TypeSafeClient } from "@typesafe-ai/sdk";
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
-import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { resolve } from "node:path";
 
-/** Register environment and file-based API-key authentication with OMP. */
-export function registerTypeSafeProvider(pi: ExtensionAPI): void {
+export interface TypeSafeProviderRegistrationOptions {
+  readonly validateApiKey?: (apiKey: string, signal?: AbortSignal) => Promise<void>;
+}
+
+/** Register environment and OMP-managed API-key authentication. */
+export function registerTypeSafeProvider(
+  pi: ExtensionAPI,
+  options: TypeSafeProviderRegistrationOptions = {},
+): void {
+  const environmentKey = process.env.TYPESAFE_API_KEY?.trim();
   pi.registerProvider("typesafe-ai", {
-    apiKey: "TYPESAFE_API_KEY",
+    ...(environmentKey === undefined || environmentKey.length === 0
+      ? {}
+      : { apiKey: environmentKey }),
     oauth: {
-      name: "TypeSafe API key",
+      name: "TypeSafe API token",
       async login(callbacks) {
-        const environmentKey = process.env.TYPESAFE_API_KEY?.trim();
-        if (environmentKey !== undefined && environmentKey.length > 0) {
-          await validateKey(environmentKey, callbacks.signal);
-          return environmentKey;
-        }
-
-        const configuredPath = await callbacks.onPrompt({
-          message:
-            "Path to a file containing the TypeSafe API key (the OMP prompt is not secret-masked)",
-          placeholder: "~/.config/typesafe/api-key",
-        });
-        const keyPath = configuredPath.startsWith("~/")
-          ? resolve(homedir(), configuredPath.slice(2))
-          : resolve(configuredPath);
-        const apiKey = (await readFile(keyPath, "utf8")).trim();
+        const apiKey = (
+          await callbacks.onPrompt({
+            message: "Paste your TypeSafe API token",
+            placeholder: "TypeSafe API token",
+          })
+        ).trim();
         if (apiKey.length === 0) {
-          throw new Error("The TypeSafe API key file is empty.");
+          throw new Error("The TypeSafe API token is empty.");
         }
-        await validateKey(apiKey, callbacks.signal);
+        callbacks.onProgress?.("Validating TypeSafe API token…");
+        await (options.validateApiKey ?? validateKey)(apiKey, callbacks.signal);
         return apiKey;
       },
     },

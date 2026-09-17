@@ -29,7 +29,7 @@ export function redactText(value: string): string {
 }
 
 /** Build the only payload permitted to cross the semantic provider boundary. */
-export function createRedactedProviderState(request: PolicyModelRequest): EntryType {
+export function createRedactedProviderState(request: PolicyModelRequest) {
   const applicableSourceIds = new Set(
     selectApplicableSources(request.snapshot.sources, request.action).map((source) => source.id),
   );
@@ -60,7 +60,7 @@ export function createRedactedProviderState(request: PolicyModelRequest): EntryT
         ? {}
         : { summary: redactText(request.authorization.summary) }),
     },
-  };
+  } satisfies EntryType;
 }
 
 function redactTarget(target: PolicyTarget): Record<string, string> {
