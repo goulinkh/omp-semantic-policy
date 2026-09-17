@@ -23,7 +23,7 @@ export function createConservativeFallback(): PolicyFallbackEvaluator {
 
       return {
         effect: "prompt",
-        reason: `No semantic policy decision is available for ${action.operation} action ${action.hostAction.name}.`,
+        reason: `The semantic evaluator is unavailable, so this ${action.operation} action was not classified as compliant or noncompliant. Explicit approval is required before ${action.hostAction.name} can run.`,
         ruleIds: ["fallback.prompt-side-effect"],
       };
     },

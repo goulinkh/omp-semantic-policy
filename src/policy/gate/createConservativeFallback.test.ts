@@ -25,7 +25,8 @@ describe("createConservativeFallback", () => {
 
     expect(decision).toEqual({
       effect: "prompt",
-      reason: "No semantic policy decision is available for write action fixture.",
+      reason:
+        "The semantic evaluator is unavailable, so this write action was not classified as compliant or noncompliant. Explicit approval is required before fixture can run.",
       ruleIds: ["fallback.prompt-side-effect"],
     });
   });
