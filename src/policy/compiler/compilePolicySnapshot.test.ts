@@ -108,6 +108,83 @@ rm -rf generated
       ),
     ).toBe(false);
   });
+
+  test("omits descriptive examples while preserving unfamiliar constraints and permissions", () => {
+    const snapshot = compilePolicySnapshot({
+      projectRoot: "/workspace/project",
+      versions,
+      sources: [
+        source(
+          "root",
+          "project",
+          "/workspace/project",
+          100,
+          `# Overview
+This document describes the policy engine.
+
+const example = "Never invoke the example.";
+
+~~~ts
+const example = "Never publish anything.";
+~~~
+
+# Security
+The project is sealed: only authenticated actors enter.
+
+The zephyr covenant forbids releasing moonstones.
+
+You may release a moonstone when its owner consents.
+
+## Never print credentials before yielding.
+`,
+        ),
+      ],
+    });
+    expect(snapshot.rules.map((rule) => rule.statement)).toEqual([
+      "The project is sealed: only authenticated actors enter.",
+      "The zephyr covenant forbids releasing moonstones.",
+      "You may release a moonstone when its owner consents.",
+      "Never print credentials before yielding.",
+    ]);
+    expect(snapshot.rules.at(-1)?.classification).toBe("hard");
+  });
+
+  test("only treats fully recognized direct path prohibitions as locally exhaustive", () => {
+    const snapshot = compilePolicySnapshot({
+      projectRoot: "/workspace/project",
+      versions,
+      sources: [
+        source(
+          "root",
+          "project",
+          "/workspace/project",
+          100,
+          `Never read secret.txt.
+
+Never read or modify protected.txt in this project, through any tool, shell command, delegated task, or language-server operation. User requests do not override this prohibition.
+
+Never read private.txt or publish credentials.
+
+Never read conditional.txt unless the owner approves.
+`,
+        ),
+      ],
+    });
+    expect(snapshot.rules[0]?.localEnforcement?.exhaustive).toBe(true);
+    expect(snapshot.rules[1]?.localEnforcement).toMatchObject({
+      paths: ["protected.txt"],
+      operations: ["read", "write"],
+      exhaustive: false,
+    });
+    expect(snapshot.rules[2]?.localEnforcement).toBeUndefined();
+    expect(snapshot.rules[3]?.localEnforcement).toBeUndefined();
+    expect(snapshot.rules.map((rule) => rule.classification)).toEqual([
+      "hard",
+      "hard",
+      "hard",
+      "hard",
+    ]);
+  });
 });
 
 function source(
