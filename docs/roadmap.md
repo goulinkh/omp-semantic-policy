@@ -8,7 +8,7 @@ The marketplace plugin now includes:
 - canonical nearest-worktree identity, Git-root-bounded discovery, nested-repository exclusion, symlink canonicalization, and subtree applicability;
 - deterministic compilation with heading/phase context, provenance, precedence, content-addressed snapshot identity, and explicit compiler/model/question/threshold versions;
 - profile-scoped SQLite migrations, projects, immutable snapshots, consent, stale transitions, and redacted audits with separate raw-provider, adapter, and final-enforcement diagnostics;
-- TypeSafe SDK integration, models-list validation, complete redacted context, thresholded decisions, `jev-latest` selection with resolved-model diagnostics, and explicit unassessed provider fallback;
+- TypeSafe SDK integration, models-list validation, lossless whole-rule chunk coverage for oversized policies, conservative aggregation, thresholded decisions, `jev-latest` selection with per-chunk resolved-model diagnostics, and explicit unassessed provider fallback;
 - automatic onboarding plus `/policy status`, `/policy coverage`, `/policy onboard`, `/policy review`, `/policy audit [1–100]`, and `/policy consent`;
 - pre-effect gates for registered tools, direct shell, direct Python, and session-stop workflow checks, with grounded local path protections before remote-coverage filtering;
 - outcome recording through `tool_result`, request-scoped current-turn context, digest-bound exact-action authorization, and policy-source stale/recompile behavior;
@@ -51,10 +51,11 @@ Acceptance: parent instructions above the Git root are excluded, nested reposito
 - Parse sources with provenance and precedence.
 - Classify hard requirements, workflow obligations, advisory preferences, and unclassified semantic statements.
 - Run deterministic applicability and grounded local literal-path checks before semantic evaluation, preserving conditions, exceptions, and cross-cutting prohibitions.
-- Add the TypeSafe policy-model adapter, redaction, thresholding, and cached client reuse; keep complete relevant context together or return unassessed at the context limit.
+- Add the TypeSafe policy-model adapter, redaction, thresholding, and cached client reuse. Keep small policies in one request; preflight oversized policies into whole-rule chunks of at most 40,000 serialized bytes each and at most 64 requests, with repeated full redacted action/authorization and preserved source/heading dictionaries. Keep contiguous same-source/heading groups together when they fit.
+- Run at most four calls concurrently under one overall 20-second default deadline, without retries. Any valid denial wins, otherwise any unavailability wins over prompt, and allow requires every chunk to allow under a consistent resolved model. Stop new calls on cancellation or consent loss. Preserve explicit host confirmation/fallback settings.
 - Record the selected backend plus compiler/question/threshold versions in snapshots, resolved models in diagnostics, and actual matched rules separately from applicable candidates.
 
-Acceptance: applicable instructions receive a provider decision; ambiguity follows the configured automatic default or confirmation threshold; provider failure follows the documented availability behavior.
+Acceptance: all applicable rules are covered before an aggregate allow; ambiguity follows the configured automatic default or confirmation threshold; provider failure and irreducibly oversized input follow the documented availability behavior. Chunking is conservative bounded coverage, not full global semantic equivalence: cross-chunk exceptions and dependencies can change outcomes, including extra false denials. No improved live accuracy is claimed.
 
 ## Phase 5: current OMP adapters
 

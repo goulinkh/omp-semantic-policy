@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import { createHash } from "node:crypto";
 import type { ExtensionAPI, ProviderConfig } from "@oh-my-pi/pi-coding-agent";
 import type { Fetch } from "@typesafe-ai/sdk";
 import type { PolicyModelRequest, PolicySnapshot } from "../../policy/index.js";
@@ -23,6 +24,7 @@ interface CapturedWireRequest {
       readonly sources: readonly (readonly [string, number])[];
       readonly contexts: readonly (readonly string[])[];
       readonly rules: readonly (readonly [string, string, number, number, string])[];
+      readonly partition?: { readonly index: number; readonly count: number };
     };
     readonly action: RedactedProviderState["action"];
     readonly authorization: RedactedProviderState["authorization"];
@@ -117,7 +119,7 @@ describe("TypeSafe policy model", () => {
     expect(body).not.toContain("unrelated-web-rule");
   });
 
-  test("keeps permissions and prohibitions together at the indivisible wire size boundary", async () => {
+  test("keeps a fitting policy together and partitions a 40001-byte multi-rule policy", async () => {
     const captured: CapturedRequest[] = [];
     const request = createRequest();
     const rootRule = request.snapshot.rules[0];
@@ -168,14 +170,327 @@ describe("TypeSafe policy model", () => {
       },
     });
     expect(oversized).toMatchObject({
-      kind: "unavailable",
+      kind: "decision",
+      effect: "allow",
+      ruleIds: [],
       diagnostics: {
-        status: "unavailable",
-        unavailableReason: "context-limit",
-        stateBytes: 40_001,
+        decisionBasis: "chunk-aggregation",
+        aggregation: {
+          totalChunks: 2,
+          assessedChunks: 2,
+          complete: true,
+          originalStateBytes: 40_001,
+        },
       },
     });
-    expect(captured).toHaveLength(2);
+    expect(captured).toHaveLength(4);
+    const chunks = captured
+      .slice(2)
+      .map(({ body }) => JSON.parse(body ?? "{}") as CapturedWireRequest);
+    expect(chunks.flatMap(({ state }) => state.policy.rules.map((rule) => rule[4]))).toEqual([
+      "x".repeat(padding + 1) + createRedactedProviderState(baseRequest).policy.rules[0]?.statement,
+      permission.statement,
+    ]);
+    expect(chunks.map(({ state }) => state.policy.partition)).toEqual([
+      { index: 0, count: 2 },
+      { index: 1, count: 2 },
+    ]);
+    for (const { state } of chunks) {
+      expect(Buffer.byteLength(JSON.stringify(state))).toBeLessThanOrEqual(40_000);
+    }
+  });
+
+  test("rejects indivisible oversized rules and UTF-8 action state before any provider call", async () => {
+    const captured: CapturedRequest[] = [];
+    const model = createTypeSafePolicyModel({
+      apiKey: "fixture-key",
+      hasConsent: () => true,
+      fetch: createFetch(captured, modelResponse("allow", 0.99, 0.01)),
+    });
+    const request = createChunkedRequest(1, 40_001);
+    expect(await model.evaluate(request)).toMatchObject({
+      kind: "unavailable",
+      diagnostics: { unavailableReason: "context-limit" },
+    });
+    const oversizedAction = {
+      ...createRequest(),
+      action: { ...request.action, details: { task: "界".repeat(14_000) } },
+    };
+    expect(createRedactedProviderState(oversizedAction).action.complete).toBe(true);
+    expect(await model.evaluate(oversizedAction)).toMatchObject({
+      kind: "unavailable",
+      diagnostics: { unavailableReason: "context-limit" },
+    });
+    expect(captured).toHaveLength(0);
+  });
+
+  test("covers every rule losslessly before allowing, with at most four concurrent requests", async () => {
+    const request = createChunkedRequest(7);
+    const canonical = createRedactedProviderState(request);
+    const gate = createGatedFetch();
+    const model = createTypeSafePolicyModel({
+      apiKey: "fixture-key",
+      hasConsent: () => true,
+      fetch: gate.fetch,
+    });
+    const pending = model.evaluate(request);
+    await gate.waitForCount(4);
+    expect(gate.calls).toHaveLength(4);
+    expect(gate.active()).toBe(4);
+    // A completed request opens exactly one slot; other in-flight requests remain blocked.
+    gate.respond(2, modelResponse("allow", 0.99, 0.01, gate.alias(2)));
+    await gate.waitForCount(5);
+    expect(gate.active()).toBe(4);
+    gate.respond(0, modelResponse("allow", 0.99, 0.01, gate.alias(0)));
+    await gate.waitForCount(6);
+    gate.respond(1, modelResponse("allow", 0.99, 0.01, gate.alias(1)));
+    await gate.waitForCount(7);
+    for (const index of [3, 4, 5, 6]) {
+      gate.respond(index, modelResponse("allow", 0.99, 0.01, gate.alias(index)));
+    }
+    const result = await pending;
+    expect(gate.maxActive()).toBe(4);
+    expect(result).toMatchObject({
+      kind: "decision",
+      effect: "allow",
+      ruleIds: request.snapshot.rules.map((rule) => rule.id),
+      usage: { inputTokens: 350, outputTokens: 35 },
+      diagnostics: {
+        decisionBasis: "chunk-aggregation",
+        aggregation: {
+          strategy: "all-allow-any-deny",
+          totalChunks: 7,
+          assessedChunks: 7,
+          attemptedChunks: 7,
+          concurrencyLimit: 4,
+          complete: true,
+        },
+      },
+    });
+    expect(result.diagnostics?.rawChoice).toBeUndefined();
+    expect(result.diagnostics?.rawConfidence).toBeUndefined();
+    const states = gate.calls.map(({ state }) => state);
+    const restored = states.flatMap((state) =>
+      state.policy.rules.map(([, classification, sourceIndex, contextIndex, statement]) => ({
+        class: classification,
+        sourceId: state.policy.sources[sourceIndex]?.[0],
+        precedence: state.policy.sources[sourceIndex]?.[1],
+        context: state.policy.contexts[contextIndex],
+        statement,
+      })),
+    );
+    expect(restored).toEqual(
+      canonical.policy.rules.map(({ id: _id, context, ...rule }) => ({
+        ...rule,
+        context: context ?? [],
+      })),
+    );
+    for (const [index, state] of states.entries()) {
+      expect(Buffer.byteLength(JSON.stringify(state))).toBeLessThanOrEqual(40_000);
+      expect(state.action).toEqual(canonical.action);
+      expect(state.authorization).toEqual(canonical.authorization);
+      expect(state.policy.partition).toEqual({ index, count: 7 });
+    }
+    const sizes = states.map((state) => Buffer.byteLength(JSON.stringify(state)));
+    expect(result.diagnostics).toMatchObject({
+      stateBytes: Math.max(...sizes),
+      aggregation: { totalStateBytes: sizes.reduce((total, size) => total + size, 0) },
+      chunks: states.map((state, index) => ({
+        index,
+        attempted: true,
+        applicableRuleIds: [request.snapshot.rules[index]?.id],
+        ruleIds: [request.snapshot.rules[index]?.id],
+        stateDigest: createHash("sha256").update(JSON.stringify(state)).digest("hex"),
+        diagnostics: { status: "assessed", adapterEffect: "allow" },
+      })),
+    });
+  });
+
+  test("a valid denying chunk wins over an allowing chunk and a failed sibling", async () => {
+    const request = createChunkedRequest(3);
+    const gate = createGatedFetch();
+    const model = createTypeSafePolicyModel({
+      apiKey: "fixture-key",
+      hasConsent: () => true,
+      fetch: gate.fetch,
+    });
+    const pending = model.evaluate(request);
+    await gate.waitForCount(3);
+    gate.fail(0);
+    gate.respond(1, modelResponse("allow", 0.99, 0.01, gate.alias(1)));
+    gate.respond(2, modelResponse("allow", 0.99, 0.8, gate.alias(2)));
+    expect(await pending).toMatchObject({
+      kind: "decision",
+      effect: "deny",
+      ruleIds: [request.snapshot.rules[2]?.id],
+      usage: { inputTokens: 100, outputTokens: 10 },
+      diagnostics: {
+        decisionBasis: "chunk-aggregation",
+        aggregation: { totalChunks: 3, attemptedChunks: 3, assessedChunks: 2, complete: false },
+      },
+    });
+    expect(gate.calls).toHaveLength(3);
+  });
+
+  test("one uncertain chunk prevents allow and cites only the prompting chunk", async () => {
+    const request = createChunkedRequest(2);
+    const model = createTypeSafePolicyModel({
+      apiKey: "fixture-key",
+      hasConsent: () => true,
+      fetch: async (_input, init) => {
+        const { state } = parseWireRequest(init?.body);
+        return jsonResponse(
+          modelResponse(
+            "allow",
+            state.policy.partition?.index === 0 ? 0.64 : 0.99,
+            0.01,
+            state.policy.rules[0]?.[0],
+          ),
+        );
+      },
+    });
+    expect(await model.evaluate(request)).toMatchObject({
+      kind: "decision",
+      effect: "prompt",
+      ruleIds: [request.snapshot.rules[0]?.id],
+      diagnostics: { aggregation: { complete: true, assessedChunks: 2 } },
+    });
+  });
+
+  test("a malformed or missing chunk assessment cannot be filled in by an allowing sibling", async () => {
+    const valid = modelResponse("allow", 0.99, 0.01);
+    for (const invalid of [
+      {
+        ...valid,
+        answers: { ...valid.answers, decision: { type: "choice", choice: "allow", confidence: 2 } },
+      },
+      {
+        ...valid,
+        answers: { decision: valid.answers.decision, matchedRule: valid.answers.matchedRule },
+      },
+    ]) {
+      let calls = 0;
+      const model = createTypeSafePolicyModel({
+        apiKey: "fixture-key",
+        hasConsent: () => true,
+        fetch: async (_input, init) => {
+          calls += 1;
+          return jsonResponse(
+            parseWireRequest(init?.body).state.policy.partition?.index === 0 ? valid : invalid,
+          );
+        },
+      });
+      expect(await model.evaluate(createChunkedRequest(2))).toMatchObject({
+        kind: "unavailable",
+        diagnostics: {
+          aggregation: { totalChunks: 2, attemptedChunks: 2, assessedChunks: 1, complete: false },
+        },
+      });
+      expect(calls).toBe(2);
+    }
+  });
+
+  test("a citation alias from another chunk cannot authorize an allowing chunk", async () => {
+    const request = createChunkedRequest(3);
+    const rules = request.snapshot.rules.map((rule, index) => ({
+      ...rule,
+      statement: rule.statement.slice(0, index < 2 ? 10_000 : 21_000),
+    }));
+    const gate = createGatedFetch();
+    const model = createTypeSafePolicyModel({
+      apiKey: "fixture-key",
+      hasConsent: () => true,
+      fetch: gate.fetch,
+    });
+    const pending = model.evaluate({ ...request, snapshot: { ...request.snapshot, rules } });
+    await gate.waitForCount(2);
+    const secondAliases = new Set(gate.calls[1]?.state.policy.rules.map((rule) => rule[0]));
+    const foreignAlias = gate.calls[0]?.state.policy.rules.find(
+      (rule) => !secondAliases.has(rule[0]),
+    )?.[0];
+    if (foreignAlias === undefined)
+      throw new Error("Expected a citation available only in the first chunk");
+    gate.respond(0, modelResponse("allow", 0.99, 0.01));
+    gate.respond(1, modelResponse("allow", 0.99, 0.01, foreignAlias));
+    expect(await pending).toMatchObject({
+      kind: "unavailable",
+      diagnostics: { aggregation: { complete: false } },
+    });
+  });
+
+  test("caller cancellation aborts in-flight requests and never starts queued chunks", async () => {
+    const gate = createGatedFetch();
+    const controller = new AbortController();
+    const model = createTypeSafePolicyModel({
+      apiKey: "fixture-key",
+      hasConsent: () => true,
+      fetch: gate.fetch,
+    });
+    const pending = model.evaluate(createChunkedRequest(7), controller.signal);
+    await gate.waitForCount(4);
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(gate.calls).toHaveLength(4);
+    expect(gate.signals.every((signal) => signal?.aborted)).toBe(true);
+    expect(gate.active()).toBe(0);
+  });
+
+  test("the evaluation deadline aborts a blocked batch without starting queued chunks", async () => {
+    const gate = createGatedFetch();
+    const model = createTypeSafePolicyModel({
+      apiKey: "fixture-key",
+      hasConsent: () => true,
+      fetch: gate.fetch,
+      timeoutMs: 100,
+    });
+    const pending = model.evaluate(createChunkedRequest(7));
+    expect(await pending).toMatchObject({
+      kind: "unavailable",
+      diagnostics: { aggregation: { totalChunks: 7, attemptedChunks: 4, complete: false } },
+    });
+    expect(gate.calls).toHaveLength(4);
+    expect(gate.signals.every((signal) => signal?.aborted)).toBe(true);
+    expect(gate.active()).toBe(0);
+  });
+
+  test("revoking consent mid-batch prevents queued requests and prevents aggregate allow", async () => {
+    const gate = createGatedFetch();
+    let consent = true;
+    const model = createTypeSafePolicyModel({
+      apiKey: "fixture-key",
+      hasConsent: () => consent,
+      fetch: gate.fetch,
+    });
+    const pending = model.evaluate(createChunkedRequest(7));
+    await gate.waitForCount(4);
+    consent = false;
+    for (let index = 0; index < 4; index += 1) {
+      gate.respond(index, modelResponse("allow", 0.99, 0.01));
+    }
+    expect(await pending).toMatchObject({
+      kind: "unavailable",
+      diagnostics: { aggregation: { totalChunks: 7, attemptedChunks: 4, complete: false } },
+    });
+    expect(gate.calls).toHaveLength(4);
+  });
+
+  test("different resolved models cannot aggregate to allow but cannot erase a denial", async () => {
+    for (const deny of [false, true]) {
+      const model = createTypeSafePolicyModel({
+        apiKey: "fixture-key",
+        hasConsent: () => true,
+        fetch: async (_input, init) => {
+          const index = parseWireRequest(init?.body).state.policy.partition?.index;
+          return jsonResponse({
+            ...modelResponse("allow", 0.99, deny && index === 1 ? 0.8 : 0.01),
+            model: index === 0 ? "resolved-a" : "resolved-b",
+          });
+        },
+      });
+      expect(await model.evaluate(createChunkedRequest(2))).toMatchObject(
+        deny ? { kind: "decision", effect: "deny" } : { kind: "unavailable" },
+      );
+    }
   });
 
   test("losslessly interns large repeated rule context and maps request-local aliases to canonical matches", async () => {
@@ -534,6 +849,103 @@ function createRequest(): PolicyModelRequest {
       source: "current-turn",
       explicit: true,
       summary: "Use TOKEN=super-secret-value",
+    },
+  };
+}
+
+function createChunkedRequest(ruleCount: number, statementBytes = 21_000): PolicyModelRequest {
+  const request = createRequest();
+  const root = request.snapshot.rules[0];
+  if (root === undefined) throw new Error("Root rule fixture is missing");
+  return {
+    ...request,
+    snapshot: {
+      ...request.snapshot,
+      rules: Array.from({ length: ruleCount }, (_, index) => ({
+        ...root,
+        id: `chunk-rule-${index}`,
+        context: ["Batch policy", "Applicable operations"],
+        statement: `Rule ${index}: `.padEnd(statementBytes, "x "),
+      })),
+    },
+  };
+}
+
+function parseWireRequest(body: unknown): CapturedWireRequest {
+  if (typeof body !== "string") throw new Error("Expected a serialized provider request");
+  return JSON.parse(body) as CapturedWireRequest;
+}
+
+interface Deferred<T> {
+  readonly promise: Promise<T>;
+  readonly resolve: (value: T) => void;
+  readonly reject: (reason: unknown) => void;
+}
+
+function deferred<T>(): Deferred<T> {
+  let resolve!: (value: T) => void;
+  let reject!: (reason: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, resolve, reject };
+}
+
+function createGatedFetch() {
+  const calls: CapturedWireRequest[] = [];
+  const signals: (AbortSignal | null | undefined)[] = [];
+  const responses: Deferred<Response>[] = [];
+  const waiters: { count: number; resolve: (value: void) => void }[] = [];
+  let active = 0;
+  let maximum = 0;
+  const fetch: Fetch = async (_input, init) => {
+    const response = deferred<Response>();
+    calls.push(parseWireRequest(init?.body));
+    responses.push(response);
+    const signal = init?.signal;
+    signals.push(signal);
+    active += 1;
+    maximum = Math.max(maximum, active);
+    const abort = () => response.reject(new DOMException("Aborted", "AbortError"));
+    signal?.addEventListener("abort", abort, { once: true });
+    if (signal?.aborted) abort();
+    for (const waiter of waiters) {
+      if (calls.length >= waiter.count) waiter.resolve();
+    }
+    try {
+      return await response.promise;
+    } finally {
+      active -= 1;
+      signal?.removeEventListener("abort", abort);
+    }
+  };
+  return {
+    fetch,
+    calls,
+    signals,
+    active: () => active,
+    maxActive: () => maximum,
+    waitForCount(count: number): Promise<void> {
+      if (calls.length >= count) return Promise.resolve();
+      const waiter = deferred<void>();
+      waiters.push({ count, resolve: waiter.resolve });
+      return waiter.promise;
+    },
+    alias(index: number): string {
+      const alias = calls[index]?.state.policy.rules[0]?.[0];
+      if (alias === undefined) throw new Error(`No rule in provider request ${index}`);
+      return alias;
+    },
+    respond(index: number, value: unknown) {
+      const response = responses[index];
+      if (response === undefined) throw new Error(`No pending provider request ${index}`);
+      response.resolve(jsonResponse(value));
+    },
+    fail(index: number) {
+      const response = responses[index];
+      if (response === undefined) throw new Error(`No pending provider request ${index}`);
+      response.reject(new Error("Fixture provider transport failure"));
     },
   };
 }

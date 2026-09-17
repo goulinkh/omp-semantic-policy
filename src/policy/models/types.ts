@@ -31,10 +31,28 @@ export interface PolicyModelDiagnostics {
   readonly rawConfidence?: number;
   readonly hardViolationProbability?: number;
   readonly adapterEffect?: "allow" | "prompt" | "deny";
-  readonly decisionBasis?: "choice" | "hard-violation" | "low-confidence";
+  readonly decisionBasis?: "choice" | "hard-violation" | "low-confidence" | "chunk-aggregation";
   readonly attribution?: "validated" | "none" | "invalid" | "missing";
   readonly unavailableReason?: PolicyModelUnavailableReason;
   readonly stateBytes?: number;
+  readonly chunks?: readonly {
+    readonly index: number;
+    readonly attempted: boolean;
+    readonly applicableRuleIds: readonly string[];
+    readonly ruleIds: readonly string[];
+    readonly stateDigest: string;
+    readonly diagnostics: Omit<PolicyModelDiagnostics, "chunks" | "aggregation">;
+  }[];
+  readonly aggregation?: {
+    readonly strategy: "all-allow-any-deny";
+    readonly totalChunks: number;
+    readonly assessedChunks: number;
+    readonly attemptedChunks: number;
+    readonly concurrencyLimit: number;
+    readonly complete: boolean;
+    readonly originalStateBytes: number;
+    readonly totalStateBytes: number;
+  };
 }
 
 export type PolicyModelResult =

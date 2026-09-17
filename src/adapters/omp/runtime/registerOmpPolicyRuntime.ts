@@ -879,7 +879,7 @@ function clarifyUnavailableEvaluator(
   const setup = (() => {
     switch (decision.evidence.diagnostics?.semantic?.unavailableReason) {
       case "context-limit":
-        return "Relevant policy exceeds the provider context limit. Inspect sources with /policy review and applicability with /policy audit; no rules were discarded or split.";
+        return "Policy contains an indivisible oversized rule/action or exceeds bounded chunk capacity. Inspect sources with /policy review and evaluation details with /policy audit; no policy text was truncated.";
       case "invalid-response":
         return "TypeSafe returned an invalid decision or rule attribution. Inspect /policy audit before retrying; no compliant assessment is available.";
       case "missing-snapshot":

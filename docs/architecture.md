@@ -120,7 +120,23 @@ The first provider integration is TypeSafe:
 - one-time profile consent before remote egress;
 - redaction before egress;
 - only applicable instruction statements, normalized action metadata, and redacted current-turn authorization are transmitted;
-- complete relevant policy context in one bounded request; oversized state is reported as unavailable instead of splitting related prohibitions, permissions, and exceptions into unsafe independent chunks.
+- complete relevant policy coverage through one bounded request for small policies or conservative whole-rule chunk aggregation for oversized policies.
+
+### Bounded policy requests
+
+The planner losslessly interns source/precedence and heading metadata; it never truncates or drops rule statements. Each serialized provider state is at most 40,000 UTF-8 bytes, including partition metadata for multi-request plans. Every chunk repeats the full redacted action and authorization and preserves the source and heading dictionaries. Contiguous rules with the same source and heading stay together when their complete group fits an empty chunk; otherwise the planner splits only between whole rules. Small policies retain one request without partition metadata.
+
+All chunks are planned before any provider call. More than 64 chunks, or an indivisible rule or repeated action/authorization and dictionary state that cannot fit the per-request bound, makes the evaluation unavailable before egress. Chunking therefore provides bounded coverage, not unlimited context capacity.
+
+At most four SDK calls run concurrently under one overall evaluation deadline (`timeoutMs`, default 20 seconds), without retries. Caller cancellation propagates to in-flight calls; cancellation or consent loss prevents new calls. Each response is thresholded independently using the existing 0.65 decision-confidence and 0.8 hard-violation cutoffs, with citation aliases validated only against that chunk.
+
+Aggregation uses `all-allow-any-deny`: any valid chunk denial wins even if another chunk fails; otherwise any unavailable chunk makes the aggregate unavailable; otherwise any prompt yields a prompt. Allow requires every planned chunk to be assessed as allow, covering every applicable rule. Different resolved models make the aggregate unavailable unless a valid denial is decisive. SDK errors are retained per chunk, and usage sums valid responses.
+
+This user-approved conservative strategy is not globally equivalent to evaluating all rules together. Grouping reduces avoidable separation but cannot preserve every cross-chunk permission, exception, dependency, or conflict. Outcomes can differ, including extra false denials; bounded rule coverage does not establish improved live accuracy. Provider aggregation does not override the host's explicit confirmation or fallback settings described below.
+
+Multi-request diagnostics use `decisionBasis: "chunk-aggregation"` without inventing aggregate `rawChoice` or `rawConfidence`. Each chunk records its zero-based index, whether it was attempted, applicable and matched rule IDs, serialized-state SHA-256 digest, and single-request diagnostics. Aggregate citations come from denying chunks for deny, prompting chunks for prompt, or all matched rules for allow, never all candidate IDs. `stateBytes` is the largest planned wire state; aggregation metadata records strategy, total/assessed/attempted chunk counts, concurrency limit, completeness, original state bytes, and total planned state bytes. Single-request diagnostics remain compatible.
+
+Aggregate confidence is the minimum chunk confidence for allow/prompt, or the confidence of the denying chunk with the highest hard-violation score for deny. Aggregate `hardViolationProbability` is the maximum assessed chunk score. These extrema are routing statistics, not a calibrated joint probability or a new raw model answer. For a mixed-model denial, the top-level model identifies that decisive denying response; individual models remain visible in chunk diagnostics.
 
 ## Availability behavior
 
