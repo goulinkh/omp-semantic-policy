@@ -4,14 +4,15 @@
 
 OMP Semantic Policy is a semantic policy plane, not a sandbox. It decides whether a proposed OMP action is consistent with standing instructions and current user authorization. OMP remains responsible for exposing a pre-effect interception point and enforcing the returned decision.
 
-The first delivery is one marketplace package with a strict source boundary:
+The package keeps host, provider, and policy concerns separated:
 
 ```text
-src/policy/          compiler, snapshots, precedence, evaluation, decisions
-src/adapters/omp/    OMP events, commands, UI, storage integration
+src/policy/             compiler, snapshots, applicability, evaluation, decisions
+src/adapters/omp/       OMP events, commands, project discovery, SQLite persistence
+src/adapters/typesafe/  provider payload redaction, API adapter, OMP authentication
 ```
 
-`src/policy` must not import OMP. It should be exported for reuse. A separate package is deferred until a second consumer justifies it.
+`src/policy` does not import OMP, TypeSafe, SQLite, filesystem, environment, or UI modules. It is exported for reuse. A separate package remains deferred until a second consumer justifies it.
 
 ## Action pipeline
 
@@ -25,7 +26,7 @@ host event
   -> host enforcement and audit record
 ```
 
-Deterministic rules run first. They cover explicit prohibitions, exact path restrictions, project boundaries, protected credentials, and already-resolved user authorization. Model evaluation handles semantic matching, ambiguity, and instruction classification; it must not weaken a deterministic denial.
+Deterministic checks run first and allow a snapshot action only when no compiled rule applies. Model evaluation handles semantic matching, ambiguity, hard constraints, and workflow checks; it cannot weaken an earlier deterministic result. Provider unavailability reaches a conservative fallback.
 
 ## Normalized action
 
@@ -39,7 +40,7 @@ The implemented `PolicyAction` records:
 - normalized targets;
 - interception capability: precise, dispatch-only, advisory, or absent.
 
-The evaluation context separately carries headless state and optional authorization and snapshot references. Project compilation will populate those references without coupling actions to OMP storage.
+The evaluation context separately carries headless state and optional authorization and snapshot references. The OMP runtime populates both from `before_agent_start` and the active project snapshot without coupling actions to storage.
 
 The engine does not depend on OMP tool names. The OMP adapter translates `write`, `edit`, `bash`, `eval`, `task`, MCP calls, and future tools into the shared operation vocabulary.
 
@@ -58,17 +59,18 @@ type PolicyDecision =
     };
 ```
 
-Decision evidence identifies the evaluator, evidence class, and matched rule identifiers. Model, compiler, question, and threshold versions will enter evidence through compiled snapshot metadata. User-facing explanations stay concise; durable audit records may be richer but must remain redacted.
+Decision evidence identifies the evaluator, evidence class, and matched rule identifiers. Every snapshot records model, compiler, question, and threshold versions. User-facing explanations stay concise; durable audit records contain redacted target summaries, decisions, and outcomes.
 
 ## Instruction classification
 
-Compiled instructions use three behavioral classes:
+Compiled instructions use four behavioral classes:
 
-1. **Hard requirement** — explicit and unambiguous constraints may block actions.
-2. **Workflow requirement** — sequencing and completion obligations are checked at relevant transitions and session stop.
-3. **Advisory preference** — style or preference guidance influences behavior but does not block.
+1. **Hard requirement** — explicit constraints and prohibitions.
+2. **Workflow requirement** — sequencing and completion obligations checked at relevant transitions and session stop.
+3. **Advisory preference** — style or preference guidance.
+4. **Semantic statement** — statements that do not safely fit the first three classes.
 
-Ambiguous or conflicting requirements require review instead of silently becoming hard enforcement.
+Classification retains source provenance and precedence. Enforcement uses the semantic model when applicable rules exist; ambiguity or provider failure requires review rather than silently becoming a hard denial.
 
 ## Policy snapshot
 
@@ -81,8 +83,7 @@ A snapshot is immutable and includes:
 - compiler version;
 - question/prompt version;
 - threshold version;
-- consent and redaction configuration;
-- creation time and content digest.
+- creation time and content-addressed identity.
 
 When a policy source is modified, the old snapshot governs the mutation that changes it. A new snapshot must be compiled before the next high-impact action.
 
@@ -94,12 +95,12 @@ No policy data may be keyed only by the current directory string. Symlink resolu
 
 ## Storage
 
-- Credentials: OMP `AuthStorage` in the profile-scoped `agent.db`.
-- Project state and snapshots: profile-scoped `~/.omp/agent/policy.db`.
+- Credentials: OMP `AuthStorage`, with `TYPESAFE_API_KEY` as the environment fallback.
+- Project state, immutable snapshots, consent, and redacted audits: profile-scoped `policy.db` under `getAgentDir()`.
 - Session entries: unsuitable for durable project state.
-- Policy state must not add private tables to OMP's `agent.db`.
+- Policy state does not add private tables to OMP's `agent.db`.
 
-The credential store is expected to live in a mode `0700` directory with database mode `0600`. The current representation is plaintext JSON inside SQLite; this is host-compatible storage, not an operating-system keychain.
+The policy database parent directory is mode `0700` and the database is mode `0600`. WAL, foreign keys, versioned transactional migrations, and project-root keys isolate durable state.
 
 ## Provider abstraction
 
@@ -109,11 +110,12 @@ The first provider integration is TypeSafe:
 
 - provider name: `typesafe-ai`;
 - OMP-native `/login typesafe-ai` and `/logout typesafe-ai`;
+- interactive login reads the key from a user-supplied file because the OMP 18.1.19 extension prompt is not secret-masked;
 - validation using the models-list endpoint, not paid inference;
 - `TYPESAFE_API_KEY` environment fallback;
-- one-time profile consent before sending instruction text;
+- one-time profile consent before remote egress;
 - redaction before egress;
-- no arbitrary repository source transmission.
+- only applicable instruction statements, normalized action metadata, and redacted current-turn authorization are transmitted.
 
 ## Availability behavior
 
@@ -125,6 +127,16 @@ Local deterministic rules remain available without the remote provider. If seman
 - advisory rules never become blocking due solely to provider failure.
 
 Unknown tools follow the same conservative behavior.
+
+## Enforced OMP surfaces
+
+- registered tool calls through `tool_call`, with outcomes observed through `tool_result`;
+- direct `!` shell and `$` Python execution through `user_bash` and `user_python`;
+- known mutating slash commands through `input`;
+- project workflow completion through `session_stop`, limited to one continuation per turn;
+- unrestricted child sessions when OMP propagates the extension.
+
+Broad shells and restricted children remain dispatch-gated: their enclosing action is checked, but nested effects cannot be intercepted individually.
 
 ## Threat boundary
 

@@ -2,17 +2,19 @@
 
 ## Current implementation
 
-The first vertical slice is implemented:
+The marketplace plugin now includes:
 
-- Bun/TypeScript marketplace package and OMP extension entry point;
-- provider-independent action, decision, evaluator, and gate contracts;
-- deterministic-before-semantic evaluator precedence;
-- conservative no-snapshot fallback that allows reads/workflow and requires approval for side effects;
-- OMP registered-tool normalization and decision application;
-- `/policy status` and `/policy coverage`;
-- unit and integration-level contract tests.
+- provider-independent actions, decisions, instruction sources, snapshots, audits, and policy-model contracts;
+- canonical nearest-worktree identity, Git-root-bounded discovery, nested-repository exclusion, symlink canonicalization, and subtree applicability;
+- deterministic compilation with provenance, precedence, content-addressed snapshot identity, and explicit compiler/model/question/threshold versions;
+- profile-scoped SQLite migrations, projects, immutable snapshots, consent, stale transitions, and redacted audits;
+- TypeSafe SDK integration, models-list validation, redacted request construction, thresholded decisions, `jev-latest` selection, and conservative provider fallback;
+- automatic onboarding plus `/policy status`, `/policy coverage`, `/policy onboard`, `/policy review`, and `/policy consent`;
+- pre-effect gates for registered tools, direct shell, direct Python, known mutating slash commands, and session-stop workflow checks;
+- outcome recording through `tool_result`, current-turn authorization capture, and policy-source stale/recompile behavior;
+- automated contract/integration tests and a credential-gated real-provider project end-to-end.
 
-Phase 1 remains open for policy snapshots, source provenance, audit records, and the general policy-model provider contract. Later adapter phases remain open where `/policy coverage` reports them as uncovered.
+The remaining coverage limit is imposed by OMP 18.1.19: restricted children remove extensions, and broad shell/evaluation calls expose dispatch but not every nested effect. `/policy coverage` labels both cases explicitly.
 
 ## Phase 1: package and contracts
 
@@ -31,7 +33,7 @@ Acceptance: the policy module compiles without importing OMP and a host adapter 
 - Add or upstream secret prompt metadata so key input is masked.
 - Require and persist one-time profile consent for instruction egress.
 
-Acceptance: login survives restart in the selected OMP profile; logout removes it; validation performs no paid inference; secret input is not echoed.
+Acceptance: login survives restart in the selected OMP profile; logout removes it; validation performs no paid inference; the extension never requests a secret through OMP's unmasked prompt.
 
 ## Phase 3: project discovery and state
 
@@ -46,12 +48,12 @@ Acceptance: parent instructions above the Git root are excluded, nested reposito
 ## Phase 4: compiler and evaluation
 
 - Parse sources with provenance and precedence.
-- Classify hard requirements, workflow obligations, advisory preferences, ambiguity, and conflicts.
-- Run deterministic rules before semantic evaluation.
-- Add the TypeSafe policy-model adapter, redaction, thresholding, and local cache.
-- Pin the starting backend version and include all compiler/question/threshold versions in snapshots.
+- Classify hard requirements, workflow obligations, advisory preferences, and unclassified semantic statements.
+- Run deterministic applicability checks before semantic evaluation.
+- Add the TypeSafe policy-model adapter, redaction, thresholding, and cached client reuse.
+- Record the selected backend plus compiler/question/threshold versions in snapshots.
 
-Acceptance: explicit prohibitions can block locally; ambiguous instructions prompt review; provider failure follows the documented availability behavior.
+Acceptance: applicable instructions receive a provider decision; ambiguity prompts review; provider failure follows the documented availability behavior.
 
 ## Phase 5: current OMP adapters
 
@@ -69,7 +71,7 @@ Acceptance: every registered tool in the main session and an unrestricted subage
 
 - Implement `/policy status`, `/policy coverage`, `/policy onboard`, and review flows.
 - Report enforced, dispatch-gated, advisory, and uncovered surfaces for the active session.
-- Use OMP status, widget, and notification APIs for onboarding and degraded-state messages.
+- Use OMP status and notification APIs for onboarding and degraded-state messages.
 - Produce redacted audit records explaining the policy clauses and evidence behind decisions.
 - Never silently rewrite native OMP approval configuration.
 
@@ -77,19 +79,15 @@ Acceptance: unsupported or bypassable surfaces cannot appear as enforced, and re
 
 ## Phase 7: behavioral verification
 
-Exercise the actual OMP runtime rather than relying only on unit tests:
+Verification exercises both adapters and the actual boundaries:
 
-- block a built-in write before filesystem mutation;
-- revise an eligible tool input;
-- enforce an unrestricted child call;
-- demonstrate restricted-child dispatch-only status;
-- block direct interactive shell and Python commands;
-- gate a slash command with a direct core mutation;
-- show that an allowed broad execution action has no nested interception;
-- prove Git-root and nested-repository isolation;
-- edit a policy source and require recompilation before another high-impact action.
+- automated runtime-harness scenarios cover registered tool decisions, tool outcomes, direct shell, direct Python, mutating slash commands, authorization redaction, audits, and the one-continuation workflow invariant;
+- project-isolation tests cover nearest nested worktrees, `.git` files, symlink canonicalization, dependency exclusions, and subtree applicability;
+- persistence tests cover file modes, migration idempotence, transactional rollback, consent, stale state, snapshots, and redacted audits;
+- an actual OMP 18.1.19 TUI session loads the extension, shows an active snapshot through `/policy status`, intercepts a direct shell command, and returns the synthetic blocked result;
+- `testing/e2e/provider-project.ts` creates and onboards a temporary Git project, validates the live TypeSafe models endpoint, sends one redacted policy evaluation, and reports only decision metadata and usage.
 
-Retain regression tests only for durable observable contracts; keep exploratory probes under the experiment record.
+The provider end-to-end requires `TYPESAFE_API_KEY` or `TYPESAFE_API_KEY_FILE`; it is intentionally separate from the default offline test suite.
 
 ## Phase 8: upstream OMP PolicyGate
 

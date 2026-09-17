@@ -16,19 +16,19 @@
 
 ## OMP-native integration
 
-- Register an OAuth-only runtime provider named `typesafe-ai` with `pi.registerProvider(...)`.
-- Use `/login typesafe-ai` and `/logout typesafe-ai` rather than bespoke credential commands.
+- Register a runtime provider named `typesafe-ai` with `pi.registerProvider(...)`.
+- Use OMP `AuthStorage` through `/login typesafe-ai` and `/logout typesafe-ai`; because OMP 18.1.19 does not expose secret-masked extension prompts, interactive login accepts a path to an API-key file rather than the key itself.
 - Validate credentials with `TypeSafeClient.models.list()` / `GET /v1/models`, avoiding paid inference.
 - Support `TYPESAFE_API_KEY` as a fallback.
-- Add secret-prompt metadata upstream or in the host API so credential input uses the existing masked TUI input.
+- Request secret-prompt metadata upstream so a future provider login can safely accept credentials directly.
 - Use OMP marketplace updates and `marketplace.autoUpdate`; do not build a plugin updater.
 
 ## Onboarding
 
-- Automatically onboard the first time a project is seen when `autoOnboard` is enabled.
+- Automatically onboard the active Git project at session start and session switch.
 - `/policy onboard` performs the same idempotent operation manually.
-- Show progress through `ctx.ui.setStatus`, temporary `setWidget`, and completion `notify`.
-- Pin the initial model version rather than silently following latest; the researched starting point is `jev-1.13.0`.
+- Show active, stale, and fallback state through `ctx.ui.setStatus`; expose details through `/policy status` and `/policy review`.
+- Use the account's production alias `jev-latest`; the live models endpoint on 2026-09-17 exposed `jev-latest` and `jev-preview`, not the researched `jev-1.13.0` identifier.
 - Version model, compiler, policy question, and decision thresholds in every snapshot.
 
 ## Isolation
@@ -44,17 +44,16 @@
 ## Enforcement semantics
 
 - Combine standing policy with explicit current-turn user authorization.
-- Allow explicit, unambiguous hard requirements to enforce.
+- Compile hard, workflow, advisory, and semantic statements with source provenance.
 - Treat workflow obligations as transition or session-stop checks.
-- Treat style and preferences as advisory.
-- Send ambiguous or conflicting instructions to review.
+- Send ambiguous or conflicting instructions to semantic evaluation or conservative review.
 - Let the existing snapshot govern edits to its own policy sources, then recompile before later high-impact actions.
-- Evaluate deterministic constraints before semantic model calls.
+- Run deterministic applicability checks before semantic model calls.
 
 ## Privacy
 
 - Require one-time profile consent before TypeSafe instruction egress.
-- Redact credentials and sensitive values before transmission.
+- Redact recognized credential assignments, bearer tokens, provider-key formats, and URL userinfo before transmission.
 - Send relevant instruction material and normalized action context, not arbitrary source files.
 - Make remote-evaluation unavailability visible and use conservative local fallback behavior.
 
