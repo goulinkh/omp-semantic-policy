@@ -220,7 +220,11 @@ export function evaluationDiagram(theme: Theme): JSXElement {
         ),
       ),
     ),
-    diagramNote("Default deny", "Uncertainty blocks. Interactive confirmation is opt-in.", palette),
+    diagramNote(
+      "Automatic acceptance",
+      "Uncertainty passes without prompts. Explicit denials block.",
+      palette,
+    ),
     element(
       "div",
       {

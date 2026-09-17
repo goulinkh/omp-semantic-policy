@@ -1,10 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import type { PolicyDecision } from "../../../policy/index.js";
+import { normalizeOmpToolCall } from "../events/normalizeToolCall.js";
 import {
   createPolicyStatusBarController,
   formatPolicyDecisionFeedback,
   loadPolicyRuntimeSettings,
-  stylePolicyDecisionFeedback,
   type PolicyStatusBarHost,
 } from "./policyPresentation.js";
 
@@ -68,35 +68,111 @@ describe("policy session presentation", () => {
     });
   });
 
-  test("formats noncompliant decisions and stays silent for allowed actions", () => {
-    expect(formatPolicyDecisionFeedback(decision("allow"))).toBeUndefined();
-    expect(formatPolicyDecisionFeedback(decision("deny", "Secret publication is forbidden."))).toBe(
-      "⛨ Policy: denied · Secret publication is forbidden.",
+  test("binds feedback to the actual command and call while keeping allowed calls silent", () => {
+    const wc = action("bash", "call-wc", { command: "wc -c dist/index.js" });
+    const build = action("bash", "call-build", { command: "bun run build" });
+    expect(formatPolicyDecisionFeedback(decision("allow"), wc)).toBeUndefined();
+    const blocked = formatPolicyDecisionFeedback(decision("deny"), wc);
+    expect(blocked).toContain("Blocked bash: wc -c dist/index.js");
+    expect(blocked).toContain(wc.id);
+    expect(blocked).not.toContain(build.id);
+    const prompt = formatPolicyDecisionFeedback(decision("prompt"), build);
+    expect(prompt).toContain("bash: bun run build");
+    expect(prompt).toContain(build.id);
+    expect(prompt).not.toContain(wc.id);
+    expect(blocked).toContain("/policy audit");
+    expect(prompt).toContain("/policy audit");
+    expect(prompt).not.toContain("/policy maintenance");
+  });
+
+  test("redacts credentials and strips terminal injection before displaying bounded feedback", () => {
+    const request = action("bash", "call-\u202ewc", {
+      command: "\u001b]52;c;clipboard-secret\u0007TOKEN=command-secret curl https://example.test",
+      env: { PASSWORD: "environment-secret" },
+    });
+    const feedback = formatPolicyDecisionFeedback(
+      decision("deny", "\u001b[31mTOKEN=reason-secret\u001b[0m\nReview\u0000 required"),
+      request,
     );
-    expect(formatPolicyDecisionFeedback(decision("prompt", "Review required."))).toBe(
-      "⛨ Policy: warning · approval required · Review required.",
+    expect(feedback).toContain("curl https://example.test");
+    expect(feedback).toContain("[REDACTED:");
+    expect(
+      Array.from(feedback ?? "").some((character) => {
+        const code = character.charCodeAt(0);
+        return (
+          code <= 8 || (code >= 11 && code <= 31) || (code >= 127 && code <= 159) || code === 0x202e
+        );
+      }),
+    ).toBe(false);
+    for (const secret of [
+      "command-secret",
+      "environment-secret",
+      "reason-secret",
+      "clipboard-secret",
+    ])
+      expect(feedback).not.toContain(secret);
+    const longPath = action("write", "call-long", { path: `/tmp/${"a".repeat(5_000)}` });
+    const bounded = formatPolicyDecisionFeedback(decision("deny"), longPath);
+    expect(bounded).toContain(longPath.id);
+    expect(bounded).toContain("/tmp/");
+    expect(bounded?.length).toBeLessThan(1_000);
+  });
+
+  test("never exposes eval programs, write bodies, or inline shell programs in action summaries", () => {
+    const evaluation = action("eval", "call-eval", { code: "privateEvalProgram()" });
+    const writing = action("write", "call-write", {
+      path: "/tmp/output.txt",
+      content: "private write body",
+    });
+    const shell = action("bash", "call-python", {
+      command: `python -c 'privateShellProgram()'`,
+    });
+    const heredoc = action("bash", "call-heredoc", {
+      command: "python <<'EOF'\nprivateHereDocProgram()\nEOF",
+    });
+    expect(formatPolicyDecisionFeedback(decision("deny"), evaluation)).not.toContain(
+      "privateEvalProgram",
+    );
+    const writeFeedback = formatPolicyDecisionFeedback(decision("deny"), writing);
+    expect(writeFeedback).toContain("/tmp/output.txt");
+    expect(writeFeedback).not.toContain("private write body");
+    const shellFeedback = formatPolicyDecisionFeedback(decision("deny"), shell);
+    expect(shellFeedback).toContain("python");
+    expect(shellFeedback).not.toContain("privateShellProgram");
+    expect(formatPolicyDecisionFeedback(decision("deny"), heredoc)).not.toContain(
+      "privateHereDocProgram",
     );
   });
 
-  test("uses criticality backgrounds for policy feedback", () => {
-    const theme = {
-      fgOnBg(foreground: string, background: string, text: string) {
-        return `<fg:${foreground}:${background}>${text}</fg>`;
+  test("shows grounded decisive provenance without suggesting approval of hard denials", () => {
+    const denied: PolicyDecision = {
+      effect: "deny",
+      reason: "Protected path",
+      evidence: {
+        evaluatorId: "local",
+        source: "deterministic",
+        ruleIds: ["hard.rule"],
+        diagnostics: {
+          path: "local-denial",
+          decisiveRule: {
+            ruleId: "hard.rule",
+            sourceId: "project-policy",
+            sourcePath: "/project/AGENTS.md",
+          },
+          confirmation: { resolution: "not-required" },
+          enforcedEffect: "deny",
+        },
       },
-      bold(text: string) {
-        return `<bold>${text}</bold>`;
-      },
-      bgFill(background: string, text: string) {
-        return `<bg:${background}>${text}</bg>`;
-      },
-    } as never;
-
-    expect(stylePolicyDecisionFeedback("denied", decision("deny"), theme)).toBe(
-      "<bg:toolErrorBg><bold><fg:error:toolErrorBg> denied </fg></bold></bg>",
+    };
+    const feedback = formatPolicyDecisionFeedback(
+      denied,
+      action("write", "call-protected", { path: "/project/AGENTS.md" }),
     );
-    expect(stylePolicyDecisionFeedback("approval", decision("prompt"), theme)).toBe(
-      "<bg:toolPendingBg><bold><fg:warning:toolPendingBg> approval </fg></bold></bg>",
-    );
+    expect(feedback).toContain("hard.rule");
+    expect(feedback).toContain("project-policy");
+    expect(feedback).toContain("/project/AGENTS.md");
+    expect(feedback).toContain("/policy audit");
+    expect(feedback).not.toMatch(/confirm|approve|\/policy maintenance/iu);
   });
 });
 
@@ -109,4 +185,11 @@ function decision(effect: "allow" | "deny" | "prompt", reason?: string): PolicyD
   return effect === "allow"
     ? { effect, evidence }
     : { effect, reason: reason ?? "Policy mismatch.", evidence };
+}
+
+function action(toolName: string, toolCallId: string, input: Record<string, unknown>) {
+  return normalizeOmpToolCall(
+    { type: "tool_call", toolName, toolCallId, input },
+    { cwd: "/workspace/project", sessionManager: { getSessionId: () => "session-1" } },
+  );
 }

@@ -15,9 +15,10 @@ import { planPolicyRequests } from "./planPolicyRequests.js";
 
 export const DEFAULT_TYPESAFE_POLICY_MODEL = "jev-latest";
 export const TYPESAFE_QUESTION_VERSION = "policy-decision-v5";
-export const TYPESAFE_THRESHOLD_VERSION = "policy-thresholds-v1";
+export const TYPESAFE_THRESHOLD_VERSION = "policy-thresholds-v2";
 
-const DECISION_CONFIDENCE_THRESHOLD = 0.65;
+const DECISION_CONFIDENCE_THRESHOLD = 0.5;
+const ATTRIBUTION_CONFIDENCE_THRESHOLD = 0.65;
 const MAX_CONCURRENT_REQUESTS = 4;
 const HARD_VIOLATION_THRESHOLD = 0.8;
 const ACTION_ASSESSMENT_CONTEXT =
@@ -469,7 +470,7 @@ function validateAttribution(
   ) {
     return { status: "invalid", ruleIds: [] };
   }
-  if (value.choice === "none" || value.confidence < DECISION_CONFIDENCE_THRESHOLD) {
+  if (value.choice === "none" || value.confidence < ATTRIBUTION_CONFIDENCE_THRESHOLD) {
     return { status: "none", ruleIds: [] };
   }
   const ruleId = ruleIdsByAlias.get(value.choice);

@@ -30,10 +30,10 @@ An [Oh My Pi (OMP)](https://github.com/can1357/oh-my-pi) plugin that checks agen
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/policy-flow/policy-evaluation-dark.svg">
   <source media="(prefers-color-scheme: light)" srcset="docs/assets/policy-flow/policy-evaluation-light.svg">
-  <img src="docs/assets/policy-flow/policy-evaluation-light.svg" alt="Capture and scope an action, evaluate locally or with TypeSafe AI, then enforce and audit. Uncertainty defaults to deny. A policy gate, not a sandbox." width="1400">
+  <img src="docs/assets/policy-flow/policy-evaluation-light.svg" alt="Capture and scope an action, evaluate locally or with TypeSafe AI, then enforce and audit. Uncertainty is automatically accepted; explicit denials block. A policy gate, not a sandbox." width="1400">
 </picture>
 
-**A policy gate, not a sandbox.** Uncertainty defaults to deny.
+**A policy gate, not a sandbox.** Uncertainty is automatically accepted; explicit denials block.
 
 ## Get started
 
@@ -84,14 +84,18 @@ Maintenance approval applies to one exact retry, not blanket authorization.
 ### Status and feedback
 
 - `showStatus` (default: `true`): Show policy state in the status bar.
-- `showViolationFeedback` (default: `true`): Show feedback for denied, revised, or confirmation-required actions.
+- `showViolationFeedback` (default: `true`): Show direct-action and workflow outcome notifications. Tool denials stay attached to their own result cards; confirmation dialogs identify the exact action.
 
 ### Confirmation
 
-- `confirmationDefault` (default: `deny`): Resolve confirmation requests when no dialog is shown. Setting `approve` opts into fail-open behavior. Explicit policy denials remain blocked.
-- `confirmationThreshold` (default: `1`): Keep decisions automatic at `1`. Set below `1` to prompt for checked tools and direct actions at or above that confidence.
+- `confirmationDefault` (default: `approve`): Automatically accept confirmation requests, including unavailable-evaluator fallbacks. Set `deny` for fail-closed automatic resolution. Explicit policy denials remain blocked.
+- `confirmationThreshold` (default: `1`): Automatic mode, without dialogs, including headless sessions. Set below `1` to enable interactive confirmation at or above that confidence; `0` prompts for every uncertain checked action. Explicitly enabled prompts deny without an interactive UI.
 
 Session-stop workflow checks stay automatic and use `confirmationDefault`, so they do not interrupt the next prompt.
+
+The model decision-confidence cutoff is **50%**: a 53% `allow` no longer becomes a confirmation request solely because of confidence. The hard-violation cutoff remains **80%**, and rule attribution still requires **65%**. Existing explicit settings are preserved; use `confirmationDefault: approve` and `confirmationThreshold: 1` to adopt automatic acceptance.
+
+Blocked results name the tool, a redacted action summary, and the action ID. Feedback distinguishes uncertainty from a violation and links to `/policy audit`; a different tool is not an approval workaround.
 
 ### Remote tool coverage
 

@@ -112,7 +112,7 @@ export function registerOmpPolicyRuntime(
   let runtimeSettings: PolicyRuntimeSettings = {
     showStatus: true,
     showViolationFeedback: true,
-    confirmationDefault: "deny",
+    confirmationDefault: "approve",
     disabledToolCalls: [],
     enabledToolCalls: DEFAULT_ENABLED_TOOL_CALLS,
     confirmationThreshold: 1,
@@ -302,10 +302,6 @@ export function registerOmpPolicyRuntime(
     }
     const decision = clarifyUnavailableEvaluator(evaluatedDecision, action, semanticEvaluatorIssue);
     refreshStatus(context, repository);
-    const feedback = formatPolicyDecisionFeedback(decision);
-    if (runtimeSettings.showViolationFeedback && context.hasUI && feedback !== undefined) {
-      context.ui.notify(stylePolicyDecisionFeedback(feedback, decision, context.ui.theme), "info");
-    }
     return { decision, ...(snapshot === undefined ? {} : { snapshot }) };
   }
 
@@ -317,6 +313,16 @@ export function registerOmpPolicyRuntime(
     blocked: boolean,
   ): Promise<void> {
     const settled = settleConfirmation(decision, context.hasUI, blocked);
+    if (
+      runtimeSettings.showViolationFeedback &&
+      context.hasUI &&
+      (action.actor.kind === "user" || action.operation === "workflow")
+    ) {
+      const feedback = formatPolicyDecisionFeedback(settled, action);
+      if (feedback !== undefined) {
+        context.ui.notify(stylePolicyDecisionFeedback(feedback, settled, context.ui.theme), "info");
+      }
+    }
     const projectRoot = snapshot?.projectRoot ?? activeProjectRoot;
     if (projectRoot !== undefined) {
       (await repositoryPromise).appendAudit(
@@ -330,18 +336,6 @@ export function registerOmpPolicyRuntime(
       decision.evidence.diagnostics.semantic?.adapterEffect === "prompt"
     ) {
       await maintenance.remember(action, snapshot);
-      if (
-        maintenance.current()?.actionId === action.id &&
-        context.hasUI &&
-        runtimeSettings.showViolationFeedback
-      ) {
-        context.ui.notify(
-          brandPolicyText(
-            "For an exact maintenance retry, inspect /policy maintenance. Hard denials and unavailable evaluation remain blocking.",
-          ),
-          "info",
-        );
-      }
     }
   }
 
@@ -474,7 +468,7 @@ export function registerOmpPolicyRuntime(
       semanticEnabled,
     );
     pendingActions.set(action.id, { action, ...(snapshot === undefined ? {} : { snapshot }) });
-    const result = await applyOmpToolDecision(decision, context);
+    const result = await applyOmpToolDecision(decision, context, action);
     await recordDecision(action, decision, snapshot, context, result?.block === true);
     if (result?.block === true) {
       await recordOutcome(action, snapshot, context, "blocked");
@@ -521,13 +515,19 @@ export function registerOmpPolicyRuntime(
       undefined,
       directAuthorization,
     );
-    const allowed = await decisionAllowsExecution(decision, context);
+    const result = await applyOmpToolDecision(decision, context, action);
+    const allowed = result?.block !== true;
     await recordDecision(action, decision, snapshot, context, !allowed);
     if (allowed) {
       return;
     }
     await recordOutcome(action, snapshot, context, "blocked");
-    return { result: blockedBashResult(event.cwd, decision) };
+    return {
+      result: blockedBashResult(
+        event.cwd,
+        result?.reason ?? formatPolicyDecisionFeedback(decision, action)!,
+      ),
+    };
   });
 
   pi.on("user_python", async (event, context) => {
@@ -545,13 +545,18 @@ export function registerOmpPolicyRuntime(
       undefined,
       directAuthorization,
     );
-    const allowed = await decisionAllowsExecution(decision, context);
+    const result = await applyOmpToolDecision(decision, context, action);
+    const allowed = result?.block !== true;
     await recordDecision(action, decision, snapshot, context, !allowed);
     if (allowed) {
       return;
     }
     await recordOutcome(action, snapshot, context, "blocked");
-    return { result: blockedPythonResult(decision) };
+    return {
+      result: blockedPythonResult(
+        result?.reason ?? formatPolicyDecisionFeedback(decision, action)!,
+      ),
+    };
   });
 
   pi.on("session_stop", async (event, context) => {
@@ -587,7 +592,7 @@ export function registerOmpPolicyRuntime(
       return;
     }
     lastContinuationTurn = event.turn_id;
-    return { decision: "block", reason: decisionReason(decision) };
+    return { decision: "block", reason: formatPolicyDecisionFeedback(decision, action) };
   });
 
   pi.registerCommand("policy", {
@@ -814,54 +819,37 @@ function createDirectAction(
   };
 }
 
-async function decisionAllowsExecution(
-  decision: PolicyDecision,
-  context: ExtensionContext,
-): Promise<boolean> {
-  if (decision.effect === "allow" || decision.effect === "revise") {
-    return true;
-  }
-  if (decision.effect === "deny" || !context.hasUI) {
-    return false;
-  }
-  return context.ui.confirm(POLICY_NAME, decision.reason);
-}
-
-function blockedBashResult(cwd: string, decision: PolicyDecision) {
-  const output = brandPolicyText(`Blocked: ${decisionReason(decision)}`);
+function blockedBashResult(cwd: string, output: string) {
   const bytes = Buffer.byteLength(output);
+  const lines = output.split("\n").length;
   return {
     output,
     exitCode: 126,
     cancelled: false,
     truncated: false,
-    totalLines: 1,
+    totalLines: lines,
     totalBytes: bytes,
-    outputLines: 1,
+    outputLines: lines,
     outputBytes: bytes,
     workingDir: cwd,
   };
 }
 
-function blockedPythonResult(decision: PolicyDecision) {
-  const output = brandPolicyText(`Blocked: ${decisionReason(decision)}`);
+function blockedPythonResult(output: string) {
   const bytes = Buffer.byteLength(output);
+  const lines = output.split("\n").length;
   return {
     output,
     exitCode: 1,
     cancelled: false,
     truncated: false,
-    totalLines: 1,
+    totalLines: lines,
     totalBytes: bytes,
-    outputLines: 1,
+    outputLines: lines,
     outputBytes: bytes,
     displayOutputs: [],
     stdinRequested: false,
   };
-}
-
-function decisionReason(decision: PolicyDecision): string {
-  return decision.effect === "allow" ? "Action allowed." : decision.reason;
 }
 
 function isOnboardingCommand(editorText: string): boolean {

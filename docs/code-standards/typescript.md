@@ -69,7 +69,7 @@ Expected policy outcomes use result values, not exceptions:
 
 Throw only for broken invariants or infrastructure failures that the current layer cannot represent. Preserve the original cause when wrapping errors. Convert errors into redacted operator messages at the OMP adapter boundary.
 
-Never catch and silently allow. An unavailable semantic decision follows the configured automatic confirmation default (`deny` unless explicitly configured otherwise); this is a recorded fallback, not a violation judgment. Default threshold `1` disables dialogs. Interactive prompting is opt-in through a threshold below `1`, and headless prompts deny. Explicit policy denials must not be weakened by the automatic confirmation default.
+Never catch an error and silently invent compliance. An unavailable semantic decision follows configured confirmation behavior; it is not a violation judgment. Runtime defaults (`confirmationThreshold: 1`, `confirmationDefault: approve`) automatically accept confirmation requests without dialogs, including unavailable-evaluator fallbacks and headless sessions, while recording the resolution. Explicit `confirmationDefault: deny` selects fail-closed automatic resolution; thresholds below `1` opt into prompting, which denies without a UI. Session-stop checks remain automatic. Explicit denials and incomplete-action guards must not be weakened by confirmation settings.
 
 ## Async and lifecycle
 

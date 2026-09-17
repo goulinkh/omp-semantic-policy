@@ -1,6 +1,12 @@
 import { settings, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { getPluginSettings } from "@oh-my-pi/pi-coding-agent/extensibility/plugins";
-import type { PolicyDecision } from "../../../policy/index.js";
+import { sanitizeText } from "@oh-my-pi/pi-utils";
+import {
+  decodeLiteralShellWord,
+  SHELL_WORD_PATTERN,
+} from "../../../policy/actions/shellArguments.js";
+import type { PolicyAction, PolicyDecision } from "../../../policy/index.js";
+import { redactText } from "../../typesafe/redactProviderState.js";
 import { brandPolicyText } from "../policyIdentity.js";
 
 const PLUGIN_NAME = "omp-semantic-policy";
@@ -61,7 +67,7 @@ export async function loadPolicyRuntimeSettings(
   }
 
   const confirmationDefault =
-    overrides.confirmationDefault ?? configured.confirmationDefault ?? "deny";
+    overrides.confirmationDefault ?? configured.confirmationDefault ?? "approve";
   const confirmationThreshold = normalizeConfirmationThreshold(
     overrides.confirmationThreshold ?? configured.confirmationThreshold,
   );
@@ -139,17 +145,101 @@ function createOmpStatusBarHost(): PolicyStatusBarHost {
   };
 }
 
-export function formatPolicyDecisionFeedback(decision: PolicyDecision): string | undefined {
-  switch (decision.effect) {
-    case "allow":
-      return undefined;
-    case "deny":
-      return brandPolicyText(`Policy: denied · ${decision.reason}`);
-    case "prompt":
-      return brandPolicyText(`Policy: warning · approval required · ${decision.reason}`);
-    case "revise":
-      return brandPolicyText(`Policy: revised · ${decision.reason}`);
+export function formatPolicyDecisionFeedback(
+  decision: Exclude<PolicyDecision, { effect: "allow" }>,
+  action: PolicyAction,
+): string;
+export function formatPolicyDecisionFeedback(
+  decision: PolicyDecision,
+  action: PolicyAction,
+): string | undefined;
+export function formatPolicyDecisionFeedback(
+  decision: PolicyDecision,
+  action: PolicyAction,
+): string | undefined {
+  if (decision.effect === "allow") return undefined;
+
+  const verb =
+    decision.effect === "deny"
+      ? "Blocked"
+      : decision.effect === "prompt"
+        ? "Approval required for"
+        : "Revised";
+  const identity = `${safeFeedbackText(action.hostAction.name, 64)}: ${summarizeAction(action)} [action ${safeFeedbackText(action.id, 160)}]`;
+  const diagnostics = decision.evidence.diagnostics;
+  const decisive = diagnostics?.decisiveRule;
+  const provenance =
+    decisive !== undefined && decision.evidence.ruleIds.includes(decisive.ruleId)
+      ? ` Rule ${safeFeedbackText(decisive.ruleId, 120)} · source ${safeFeedbackText(decisive.sourceId, 120)}${decisive.sourcePath === undefined ? "" : ` (${safeFeedbackText(decisive.sourcePath, 180)})`}.`
+      : decision.evidence.ruleIds.length > 0
+        ? ` Rules: ${decision.evidence.ruleIds
+            .slice(0, 3)
+            .map((id) => safeFeedbackText(id, 120))
+            .join(", ")}${decision.evidence.ruleIds.length > 3 ? ", …" : ""}.`
+        : "";
+  const approval = decision.effect === "prompt" ? "Confirm only this action to continue. " : "";
+  return brandPolicyText(
+    `${verb} ${identity}\n${safeFeedbackText(decision.reason, 480)}${provenance}\n${approval}Inspect /policy audit for details.`,
+  );
+}
+
+function safeFeedbackText(value: string, limit: number): string {
+  const text = redactText(
+    sanitizeText(value).replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/gu, ""),
+  )
+    .replace(/\s+/gu, " ")
+    .trim();
+  return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
+}
+
+function summarizeAction(action: PolicyAction): string {
+  const command = action.targets.find((target) => target.kind === "command");
+  if (command !== undefined) return summarizeCommand(command.value);
+  const paths = action.targets.filter((target) => target.kind === "path");
+  if (paths.length > 0) {
+    return `${paths
+      .slice(0, 2)
+      .map((target) => safeFeedbackText(target.value, 160))
+      .join(", ")}${paths.length > 2 ? ", …" : ""}`;
   }
+  if (action.targets.some((target) => target.kind === "code")) return "code omitted";
+  return `${action.operation} action`;
+}
+
+function summarizeCommand(command: string): string {
+  // Preserve ordinary command identity, but never print inline programs or heredoc bodies.
+  if (command.length > 32_000) return "shell command (details omitted)";
+  command = sanitizeText(command).replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u206f\ufeff]/gu, "");
+  let end = command.indexOf("\n");
+  if (end === -1) end = command.length;
+  const heredoc = command.indexOf("<<");
+  if (heredoc !== -1) end = Math.min(end, heredoc);
+  let interpreter = false;
+  for (const match of command.slice(0, end).matchAll(SHELL_WORD_PATTERN)) {
+    const word = decodeLiteralShellWord(match[0]).decoded;
+    const executable = word.slice(word.lastIndexOf("/") + 1);
+    if (executable === "eval") {
+      end = match.index + match[0].length;
+      break;
+    }
+    if (
+      /^(?:ba|da|z|k|fi)?sh$|^(?:node(?:js)?|bun|deno|python(?:\d+(?:\.\d+)*)?|ruby|perl|php|pwsh|powershell)$/u.test(
+        executable,
+      )
+    )
+      interpreter = true;
+    if (
+      interpreter &&
+      /^(?:-[A-Za-z]*[cepr]|--(?:eval|print|command)(?:=|$)|-(?:EncodedCommand|Command)$)/iu.test(
+        word,
+      )
+    ) {
+      end = match.index;
+      break;
+    }
+  }
+  const summary = safeFeedbackText(command.slice(0, end), 200);
+  return `${summary || "shell command"}${end < command.length ? " (remaining command omitted)" : ""}`;
 }
 
 export function stylePolicyDecisionFeedback(

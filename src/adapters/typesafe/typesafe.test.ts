@@ -342,7 +342,7 @@ describe("TypeSafe policy model", () => {
         return jsonResponse(
           modelResponse(
             "allow",
-            state.policy.partition?.index === 0 ? 0.64 : 0.99,
+            state.policy.partition?.index === 0 ? 0.499 : 0.99,
             0.01,
             state.policy.rules[0]?.[0],
           ),
@@ -608,6 +608,76 @@ describe("TypeSafe policy model", () => {
     expect(captured).toHaveLength(0);
   });
 
+  test("allows the reported byte-count inspection at 53% without weakening confidence or hard-denial boundaries", async () => {
+    const request = createRequest();
+    const command = "wc -c dist/index.js";
+    const action = {
+      ...createTestPolicyAction("execute"),
+      targets: [{ kind: "command" as const, value: command }],
+      details: { command },
+      hostAction: { host: "omp", name: "bash", input: { command } },
+    };
+    for (const [choice, confidence, hardViolation, effect, basis] of [
+      ["allow", 0.53, 0.1, "allow", "choice"],
+      ["allow", 0.5, 0.1, "allow", "choice"],
+      ["allow", 0.499, 0.1, "allow", "low-confidence"],
+      ["allow", 0.499, 0.8, "deny", "hard-violation"],
+      ["prompt", 0.53, 0.1, "allow", "choice"],
+      ["deny", 0.53, 0.1, "deny", "choice"],
+    ] as const) {
+      const model = createTypeSafePolicyModel({
+        apiKey: "fixture-key",
+        hasConsent: () => true,
+        fetch: createFetch([], modelResponse(choice, confidence, hardViolation)),
+      });
+      const decision = await evaluateSnapshotPolicy({
+        action,
+        snapshot: request.snapshot,
+        context: { headless: true },
+        model,
+      });
+      expect(decision.effect).toBe(effect);
+      expect(decision.evidence.diagnostics?.semantic?.decisionBasis).toBe(basis);
+      expect(decision.evidence.diagnostics?.confirmation.resolution).toBe(
+        basis === "low-confidence" || choice === "prompt" ? "automatic-approve" : "not-required",
+      );
+      if (choice === "prompt") {
+        const interactive = await evaluateSnapshotPolicy({
+          action,
+          snapshot: request.snapshot,
+          context: { headless: false },
+          model,
+          confirmation: { defaultAction: "deny", threshold: 0 },
+        });
+        expect(interactive.effect).toBe("prompt");
+      }
+    }
+  });
+
+  test("keeps rule attribution stricter than the decision-confidence cutoff", async () => {
+    const request = createRequest();
+    for (const attributionConfidence of [0.649, 0.65]) {
+      const response = modelResponse("deny", 0.53, 0.1, "r0");
+      const model = createTypeSafePolicyModel({
+        apiKey: "fixture-key",
+        hasConsent: () => true,
+        fetch: createFetch([], {
+          ...response,
+          answers: {
+            ...response.answers,
+            matchedRule: { ...response.answers.matchedRule, confidence: attributionConfidence },
+          },
+        }),
+      });
+      const result = await model.evaluate(request);
+      expect(result).toMatchObject({
+        kind: "decision",
+        effect: "deny",
+        ruleIds: attributionConfidence === 0.65 ? ["root-rule"] : [],
+      });
+    }
+  });
+
   test("records raw choice, threshold adaptation, and enforced confirmation separately", async () => {
     const request = createRequest();
     const model = createTypeSafePolicyModel({
@@ -620,7 +690,7 @@ describe("TypeSafe policy model", () => {
       context: { headless: true },
       model,
     });
-    expect(decision.effect).toBe("deny");
+    expect(decision.effect).toBe("allow");
     expect(decision.evidence.ruleIds).toEqual([]);
     expect(decision.evidence.applicableRuleIds).toEqual(["root-rule"]);
     expect(decision.evidence.diagnostics).toMatchObject({
@@ -633,8 +703,8 @@ describe("TypeSafe policy model", () => {
         model: DEFAULT_TYPESAFE_POLICY_MODEL,
         usage: { inputTokens: 50, outputTokens: 5 },
       },
-      confirmation: { resolution: "automatic-deny", confidence: 0.14 },
-      enforcedEffect: "deny",
+      confirmation: { resolution: "automatic-approve", confidence: 0.14 },
+      enforcedEffect: "allow",
     });
   });
 
@@ -684,6 +754,15 @@ describe("TypeSafe policy model", () => {
       kind: "unavailable",
       diagnostics: { unavailableReason: "invalid-response" },
     });
+    const decision = await evaluateSnapshotPolicy({
+      ...createRequest(),
+      context: { headless: true },
+      model,
+      confirmation: { defaultAction: "deny", threshold: 1 },
+    });
+    expect(decision.effect).toBe("deny");
+    expect(decision.evidence.diagnostics?.path).toBe("provider-unavailable");
+    expect(decision.evidence.ruleIds).toEqual([]);
   });
 
   test("prompts for a token and returns it for OMP credential persistence", async () => {

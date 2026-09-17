@@ -472,12 +472,102 @@ describe("OMP policy runtime", () => {
     repository.close();
   });
 
+  test("keeps out-of-order parallel denials on their own tool results", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "omp-policy-parallel-feedback-"));
+    temporaryDirectories.push(fixture);
+    const projectRoot = join(fixture, "project");
+    const databasePath = join(fixture, "policy.db");
+    await mkdir(join(projectRoot, ".git"), { recursive: true });
+    await writeFile(join(projectRoot, "AGENTS.md"), "Never publish secrets.\n");
+    const repository = await createPolicyRepository(databasePath);
+    repository.setRemoteConsent(true);
+    repository.close();
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const notifications: string[] = [];
+    const harness = createExtensionHarness();
+    registerOmpPolicyRuntime(harness.api, {
+      databasePath,
+      profileInstructionPaths: [],
+      runtimeSettings: { showStatus: false, showViolationFeedback: true },
+      createPolicyModel: () => ({
+        ...fixturePolicyModel([]),
+        async evaluate(request) {
+          if (request.action.hostAction.name === "bash") {
+            started.resolve();
+            await release.promise;
+          }
+          return {
+            kind: "decision",
+            effect: "deny",
+            confidence: 0.9,
+            hardViolationProbability: 0.9,
+            model: "fixture",
+            usage: { inputTokens: 1, outputTokens: 1 },
+          };
+        },
+      }),
+    });
+    const context = createContext(projectRoot, [], { notifications });
+    await harness.emit("session_start", { type: "session_start" }, context);
+    const bash = harness.emit<{ block: boolean; reason: string }>(
+      "tool_call",
+      {
+        type: "tool_call",
+        toolCallId: "size-check",
+        toolName: "bash",
+        input: { command: "wc -c dist/index.js" },
+      },
+      context,
+    );
+    try {
+      await started.promise;
+      const evaluated = await harness.emit<{ block: boolean; reason: string }>(
+        "tool_call",
+        {
+          type: "tool_call",
+          toolCallId: "eval-check",
+          toolName: "eval",
+          input: { language: "js", code: 'console.log("private-code-body")' },
+        },
+        context,
+      );
+      const read = await harness.emit(
+        "tool_call",
+        {
+          type: "tool_call",
+          toolCallId: "read-check",
+          toolName: "read",
+          input: { path: "dist/index.js:1-50" },
+        },
+        context,
+      );
+      release.resolve();
+      const sized = await bash;
+      expect(read).toBeUndefined();
+      expect(sized?.block).toBe(true);
+      expect(sized?.reason).toContain("bash");
+      expect(sized?.reason).toContain("wc -c dist/index.js");
+      expect(sized?.reason).toContain("size-check");
+      expect(sized?.reason).not.toContain("eval-check");
+      expect(evaluated?.block).toBe(true);
+      expect(evaluated?.reason).toContain("eval-check");
+      expect(evaluated?.reason).not.toContain("size-check");
+      expect(evaluated?.reason).not.toContain("private-code-body");
+      expect(notifications).toEqual([]);
+    } finally {
+      release.resolve();
+      await bash;
+      await harness.emit("session_shutdown", { type: "session_shutdown" }, context);
+    }
+  });
+
   test.each([
-    { name: "defaults with UI", hasUI: true, approved: true, interactive: false },
-    { name: "defaults without UI", hasUI: false, approved: true, interactive: false },
-    { name: "opt-in approval", hasUI: true, approved: true, interactive: true },
-    { name: "opt-in declined approval", hasUI: true, approved: false, interactive: true },
-    { name: "opt-in without UI", hasUI: false, approved: true, interactive: true },
+    { name: "defaults with UI", hasUI: true, approved: false, interactive: false },
+    { name: "defaults without UI", hasUI: false, approved: false, interactive: false },
+    { name: "explicit confirmation approved", hasUI: true, approved: true, interactive: true },
+    { name: "explicit confirmation declined", hasUI: true, approved: false, interactive: true },
+    { name: "explicit confirmation without UI", hasUI: false, approved: false, interactive: true },
   ])("gates uncertain tools and workflow with $name", async ({ hasUI, approved, interactive }) => {
     const fixture = await mkdtemp(join(tmpdir(), "omp-policy-runtime-neutral-"));
     temporaryDirectories.push(fixture);
@@ -542,20 +632,26 @@ describe("OMP policy runtime", () => {
           ),
         ).toBeUndefined();
       }
-      const toolResult = await harness.emit(
-        "tool_call",
-        {
-          type: "tool_call",
-          toolCallId: "uncertain-write",
-          toolName: "write",
-          input: { path: "notes.txt", content: "safe\n" },
-        },
-        context,
-      );
-      if (interactive && hasUI && approved) {
-        expect(toolResult).toBeUndefined();
-      } else {
-        expect(toolResult).toMatchObject({ block: true });
+      for (const [toolName, input] of [
+        ["write", { path: "notes.txt", content: "safe\n" }],
+        ["bash", { command: "bun run build" }],
+        ["eval", { language: "js", code: "console.log(1 + 1)" }],
+      ] as const) {
+        const toolResult = await harness.emit(
+          "tool_call",
+          {
+            type: "tool_call",
+            toolCallId: `uncertain-${toolName}`,
+            toolName,
+            input,
+          },
+          context,
+        );
+        if (!interactive || (hasUI && approved)) {
+          expect(toolResult).toBeUndefined();
+        } else {
+          expect(toolResult).toMatchObject({ block: true });
+        }
       }
       const confirmationsBeforeStop = confirmations.length;
       const stopResult = await harness.emit(
@@ -568,9 +664,9 @@ describe("OMP policy runtime", () => {
         },
         context,
       );
-      expect(stopResult).toMatchObject({ decision: "block" });
+      expect(stopResult).toBeUndefined();
       expect(confirmations).toHaveLength(confirmationsBeforeStop);
-      expect(confirmations).toHaveLength(interactive && hasUI ? 1 : 0);
+      expect(confirmations).toHaveLength(interactive && hasUI ? 3 : 0);
     } finally {
       await harness.emit("session_shutdown", { type: "session_shutdown" }, context);
     }
@@ -578,12 +674,12 @@ describe("OMP policy runtime", () => {
     const writeDecision = auditRepository
       .listAudits(await realpath(projectRoot))
       .find((audit) => audit.phase === "decision" && audit.actionId === "uncertain-write");
-    const accepted = interactive && hasUI && approved;
+    const accepted = !interactive || (hasUI && approved);
     expect(writeDecision?.effect).toBe(accepted ? "allow" : "deny");
     expect(writeDecision?.diagnostics?.enforcedEffect).toBe(accepted ? "allow" : "deny");
     expect(writeDecision?.diagnostics?.confirmation.resolution).toBe(
       !interactive
-        ? "automatic-deny"
+        ? "automatic-approve"
         : !hasUI
           ? "headless-denied"
           : approved
@@ -832,7 +928,12 @@ describe("OMP policy runtime", () => {
           };
         },
       }),
-      runtimeSettings: { showStatus: false, showViolationFeedback: false },
+      runtimeSettings: {
+        showStatus: false,
+        showViolationFeedback: false,
+        confirmationDefault: "deny",
+        confirmationThreshold: 1,
+      },
     });
     const context = createContext(projectRoot);
     const propose = (id: string, command = "bun install --frozen-lockfile") =>

@@ -33,8 +33,6 @@ export interface EvaluateSnapshotPolicyOptions {
   readonly maintenanceApproved?: boolean;
 }
 
-const HIGH_CONFIDENCE_THRESHOLD = 0.85;
-const MEDIUM_CONFIDENCE_THRESHOLD = 0.65;
 const fallbackGate = createPolicyGate({
   deterministicEvaluators: [],
   fallbackEvaluator: createConservativeFallback(),
@@ -235,10 +233,7 @@ export async function evaluateSnapshotPolicy(
       ? { effect, evidence }
       : {
           effect,
-          reason:
-            effect === "deny"
-              ? `Semantic policy denied the action (hard-rule probability ${formatProbability(result.hardViolationProbability)}).`
-              : formatConfirmationReason(result.confidence),
+          reason: formatSemanticReason(result, semantic, ruleIds),
           evidence,
         },
     applicableRuleIds,
@@ -322,7 +317,7 @@ function attachDiagnostics(
 function resolveConfirmation(
   decision: PolicyDecision,
   semanticConfidence: number | undefined,
-  settings: PolicyConfirmationSettings = { defaultAction: "deny", threshold: 1 },
+  settings: PolicyConfirmationSettings = { defaultAction: "approve", threshold: 1 },
   maintenanceApproved: boolean,
 ): PolicyDecision {
   if (decision.effect !== "prompt") {
@@ -357,29 +352,66 @@ function resolveConfirmation(
     ? { effect, evidence }
     : {
         effect,
-        reason: formatAutomaticDenialReason(semanticConfidence),
+        reason: `${decision.reason} ${formatAutomaticDenialReason(semanticConfidence, settings)}`,
         evidence,
       };
 }
 
-function formatAutomaticDenialReason(confidence: number | undefined): string {
-  if (confidence === undefined) {
-    return "Policy confirmation denied by configuration.";
-  }
-  return `Policy confirmation denied by configuration · ${formatConfidenceBand(confidence)} confidence · ${formatProbability(confidence)}.`;
+function formatAutomaticDenialReason(
+  confidence: number | undefined,
+  settings: PolicyConfirmationSettings,
+): string {
+  const trigger =
+    settings.threshold >= 1
+      ? `confirmation threshold ${formatProbability(settings.threshold)} disables interactive confirmation`
+      : `decision confidence ${formatProbability(confidence ?? 1)} is below the confirmation threshold ${formatProbability(settings.threshold)}`;
+  return `Confirmation was automatically denied by configuration: ${trigger}; defaultAction=${settings.defaultAction}.`;
 }
 
-function formatConfidenceBand(confidence: number): "high" | "medium" | "low" {
-  if (confidence >= HIGH_CONFIDENCE_THRESHOLD) {
-    return "high";
+function formatSemanticReason(
+  result: Extract<PolicyModelResult, { kind: "decision" }>,
+  diagnostics: PolicyModelDiagnostics,
+  ruleIds: readonly string[],
+): string {
+  const hardViolation =
+    diagnostics.decisionBasis === "hard-violation" ||
+    (diagnostics.decisionBasis === "chunk-aggregation" &&
+      diagnostics.chunks?.some((chunk) => chunk.diagnostics.decisionBasis === "hard-violation"));
+  let reason: string;
+  if (hardViolation) {
+    reason = `The semantic assessment identified a hard-rule violation (hard-rule probability ${formatProbability(result.hardViolationProbability)}).`;
+  } else if (result.effect === "deny") {
+    reason = `The model explicitly chose deny (decision confidence ${formatProbability(result.confidence)}; hard-rule probability ${formatProbability(result.hardViolationProbability)}).`;
+  } else if (diagnostics.decisionBasis === "low-confidence") {
+    reason = `The model${diagnostics.rawChoice === undefined ? "" : ` chose ${diagnostics.rawChoice} but`} was too uncertain to authorize the action (decision confidence ${formatProbability(result.confidence)}); confirmation is required.`;
+  } else if (diagnostics.decisionBasis === "chunk-aggregation") {
+    reason = `The combined policy assessments require confirmation because at least one assessment was uncertain or requested approval (decision confidence ${formatProbability(result.confidence)}).`;
+  } else {
+    reason = `The model requested confirmation (decision confidence ${formatProbability(result.confidence)}).`;
   }
-  return confidence >= MEDIUM_CONFIDENCE_THRESHOLD ? "medium" : "low";
-}
-
-function formatConfirmationReason(confidence: number): string {
-  return `Policy confirmation required · ${formatConfidenceBand(confidence)} confidence · ${formatProbability(confidence)}.`;
+  const allRawAllow =
+    diagnostics.decisionBasis === "low-confidence"
+      ? diagnostics.rawChoice === "allow"
+      : diagnostics.decisionBasis === "chunk-aggregation" &&
+        diagnostics.aggregation?.complete === true &&
+        diagnostics.chunks !== undefined &&
+        diagnostics.chunks.length > 0 &&
+        diagnostics.chunks.every(
+          (chunk) =>
+            chunk.diagnostics.status === "assessed" &&
+            chunk.diagnostics.rawChoice === "allow" &&
+            chunk.diagnostics.decisionBasis !== "hard-violation",
+        );
+  if (!hardViolation && result.effect === "prompt" && allRawAllow) {
+    reason +=
+      " No violation was identified by the model; this is uncertainty, not a rule-violation finding.";
+  }
+  if (ruleIds.length > 0) {
+    reason += ` Identified rule references: ${ruleIds.join(", ")}.`;
+  }
+  return reason;
 }
 
 function formatProbability(value: number): string {
-  return `${Math.round(value * 100)}%`;
+  return `${Number((value * 100).toFixed(2))}%`;
 }

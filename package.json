@@ -37,7 +37,7 @@
       "showViolationFeedback": {
         "type": "boolean",
         "default": true,
-        "description": "Show session feedback when policy denies, revises, or requires approval for an action."
+        "description": "Show action-bound feedback for direct actions and workflow checks. Blocked tool calls always include policy feedback in their originating tool card, without session-wide notifications."
       },
       "confirmationDefault": {
         "type": "enum",
@@ -45,8 +45,8 @@
           "deny",
           "approve"
         ],
-        "default": "deny",
-        "description": "Resolve confirmation requests when no dialog is shown. Deny (default) blocks unapproved actions; approve explicitly opts into fail-open behavior. Explicit policy denials remain blocked."
+        "default": "approve",
+        "description": "Resolve confirmation requests automatically when no dialog is selected. Approve (default) accepts uncertainty, including unavailable-evaluator fallbacks; deny opts into fail-closed behavior. Explicit policy denials remain blocked."
       },
       "confirmationThreshold": {
         "type": "number",
@@ -54,7 +54,7 @@
         "min": 0,
         "max": 1,
         "step": 0.05,
-        "description": "The default 1 keeps decisions automatic without dialogs. Set below 1 to opt into prompting at or above this confidence for checked tools and direct actions; 0 prompts for every uncertain checked action. Session-stop workflow checks always use confirmationDefault so they cannot steal focus from the next prompt. Other unprompted requests also use confirmationDefault; prompts block without an interactive UI."
+        "description": "The default 1 keeps decisions automatic without dialogs, using confirmationDefault (approve by default). Set below 1 to prompt at or above that confidence; 0 prompts for every uncertain checked action. Session-stop workflow checks always resolve automatically. Explicitly selected prompts block without an interactive UI."
       },
       "enabledToolCalls": {
         "type": "string",
@@ -92,6 +92,7 @@
   "dependencies": {
     "@oh-my-pi/pi-ai": "18.1.19",
     "@oh-my-pi/pi-tui": "18.1.19",
+    "@oh-my-pi/pi-utils": "18.1.19",
     "@typesafe-ai/sdk": "0.6.0"
   }
 }
