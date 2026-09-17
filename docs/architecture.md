@@ -145,7 +145,8 @@ Local deterministic rules remain available without the remote provider. Defaults
 - reads are allowed unless a deterministic rule protects the target;
 - model `allow` and `deny` decisions remain authoritative;
 - model confirmation requests automatically use `confirmationDefault` (`deny` by default) unless interactive prompting is explicitly enabled and their confidence reaches the configured `confirmationThreshold`;
-- `confirmationThreshold: 1` is the default automatic mode; a value below `1` opts into prompts, and `0` prompts for every confirmation request;
+- `confirmationThreshold: 1` is the default automatic mode; a value below `1` opts checked tools and direct actions into prompts, and `0` prompts for every uncertain checked action;
+- session-stop workflow checks always use `confirmationDefault` instead of opening a post-response modal, which could consume input intended for the next draft;
 - an unavailable semantic evaluator uses the same confirmation default and is treated as maximum-confidence uncertainty when interactive confirmation is enabled;
 - any remaining prompt denies when the host cannot present confirmation;
 

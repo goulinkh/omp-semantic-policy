@@ -54,7 +54,7 @@
         "min": 0,
         "max": 1,
         "step": 0.05,
-        "description": "The default 1 keeps decisions automatic without dialogs. Set below 1 to opt into prompting at or above this confidence; 0 prompts for every uncertain checked action. Other requests use confirmationDefault; prompts block without an interactive UI."
+        "description": "The default 1 keeps decisions automatic without dialogs. Set below 1 to opt into prompting at or above this confidence for checked tools and direct actions; 0 prompts for every uncertain checked action. Session-stop workflow checks always use confirmationDefault so they cannot steal focus from the next prompt. Other unprompted requests also use confirmationDefault; prompts block without an interactive UI."
       },
       "enabledToolCalls": {
         "type": "string",

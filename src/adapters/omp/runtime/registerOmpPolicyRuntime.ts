@@ -256,6 +256,7 @@ export function registerOmpPolicyRuntime(
     signal?: AbortSignal,
     explicitAuthorization = authorization,
     semanticEnabled = true,
+    confirmationThreshold = runtimeSettings.confirmationThreshold,
   ): Promise<{ readonly decision: PolicyDecision; readonly snapshot?: PolicySnapshot }> {
     const { repository, snapshot } = await ensureSnapshot(context, action.operation);
     const maintenanceApproved =
@@ -285,7 +286,7 @@ export function registerOmpPolicyRuntime(
       ...(signal === undefined ? {} : { signal }),
       confirmation: {
         defaultAction: runtimeSettings.confirmationDefault,
-        threshold: runtimeSettings.confirmationThreshold,
+        threshold: confirmationThreshold,
       },
     });
     if (repository.getRemoteConsent() !== true) {
@@ -569,8 +570,18 @@ export function registerOmpPolicyRuntime(
       details: { event: "session_stop" },
       hostAction: { host: "omp", name: "session_stop", input: {} },
     };
-    const { decision, snapshot } = await evaluateAction(action, context, event.signal);
-    const allowed = await decisionAllowsExecution(decision, context);
+    // A modal opened after the assistant's visible response can consume the
+    // first byte intended for the next draft. Resolve workflow uncertainty with
+    // the configured automatic default; the continuation carries any denial.
+    const { decision, snapshot } = await evaluateAction(
+      action,
+      context,
+      event.signal,
+      authorization,
+      true,
+      1,
+    );
+    const allowed = decision.effect === "allow" || decision.effect === "revise";
     await recordDecision(action, decision, snapshot, context, !allowed);
     if (allowed) {
       return;

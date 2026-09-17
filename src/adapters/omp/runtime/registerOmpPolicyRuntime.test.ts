@@ -557,6 +557,7 @@ describe("OMP policy runtime", () => {
       } else {
         expect(toolResult).toMatchObject({ block: true });
       }
+      const confirmationsBeforeStop = confirmations.length;
       const stopResult = await harness.emit(
         "session_stop",
         {
@@ -567,12 +568,9 @@ describe("OMP policy runtime", () => {
         },
         context,
       );
-      if (interactive && hasUI && approved) {
-        expect(stopResult).toBeUndefined();
-      } else {
-        expect(stopResult).toMatchObject({ decision: "block" });
-      }
-      expect(confirmations).toHaveLength(interactive && hasUI ? 2 : 0);
+      expect(stopResult).toMatchObject({ decision: "block" });
+      expect(confirmations).toHaveLength(confirmationsBeforeStop);
+      expect(confirmations).toHaveLength(interactive && hasUI ? 1 : 0);
     } finally {
       await harness.emit("session_shutdown", { type: "session_shutdown" }, context);
     }
