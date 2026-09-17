@@ -36,6 +36,7 @@
     "format:check": "oxfmt --check --no-error-on-unmatched-pattern 'src/**/*.ts' 'testing/**/*.ts'",
     "lint": "oxlint src testing",
     "test": "bun test",
+    "test:e2e:provider": "bun testing/e2e/provider-project.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
@@ -44,5 +45,8 @@
     "oxfmt": "latest",
     "oxlint": "latest",
     "typescript": "latest"
+  },
+  "dependencies": {
+    "@typesafe-ai/sdk": "0.6.0"
   }
 }
