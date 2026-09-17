@@ -76,28 +76,22 @@ export function mono(text: string, palette: Palette, options: MonoOptions = {}):
   );
 }
 
-function sectionHeader(number: string, title: string, palette: Palette): JSXElement {
+function sectionHeader(title: string, palette: Palette): JSXElement {
   return element(
     "div",
-    { style: { display: "flex", alignItems: "center", gap: 10, height: 24 } },
-    mono(number, palette, { color: palette.blue, bold: true, size: 11 }),
-    element("div", {
-      style: { display: "flex", width: 18, height: 1, background: palette.border },
-    }),
-    element(
-      "div",
-      {
-        style: {
-          display: "flex",
-          color: palette.text,
-          fontSize: 13,
-          fontWeight: 700,
-          letterSpacing: 0.7,
-          textTransform: "uppercase",
-        },
+    {
+      style: {
+        display: "flex",
+        alignItems: "center",
+        height: 24,
+        color: palette.text,
+        fontSize: 13,
+        fontWeight: 700,
+        letterSpacing: 0.7,
+        textTransform: "uppercase",
       },
-      title,
-    ),
+    },
+    title,
   );
 }
 
@@ -182,14 +176,26 @@ export function stageCard(
         mono(number, palette, { color: palette.blue, size: 14, bold: true }),
       ),
     ),
-    ...children,
+    element(
+      "div",
+      {
+        style: {
+          display: "flex",
+          flexDirection: "column",
+          flex: 1,
+          justifyContent: "center",
+          gap: 14,
+        },
+      },
+      ...children,
+    ),
   );
 }
 
 export function contextItem(label: string, detail: string, palette: Palette): JSXElement {
   return element(
     "div",
-    { style: { display: "flex", flexDirection: "column", gap: 6, marginBottom: 18 } },
+    { style: { display: "flex", flexDirection: "column", gap: 6 } },
     mono(label, palette, { size: 12, bold: true }),
     element("div", { style: { display: "flex", fontSize: 17, lineHeight: 1.4 } }, detail),
   );
@@ -215,7 +221,7 @@ export function canvas(palette: Palette, ...children: JSXNode[]): JSXElement {
   );
 }
 
-export function diagramHeader(number: string, title: string, palette: Palette): JSXElement {
+export function diagramHeader(title: string, palette: Palette): JSXElement {
   return element(
     "div",
     {
@@ -226,7 +232,7 @@ export function diagramHeader(number: string, title: string, palette: Palette): 
         marginBottom: 18,
       },
     },
-    sectionHeader(number, title, palette),
+    sectionHeader(title, palette),
     element(
       "div",
       { style: { display: "flex", alignItems: "center", gap: 9 } },

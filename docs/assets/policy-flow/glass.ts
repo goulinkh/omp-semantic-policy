@@ -122,14 +122,15 @@ function glassLayers(theme: Theme, height: number, cards: readonly GlassCard[]):
     <ellipse cx="260" cy="${height * 0.35}" rx="640" ry="${height * 0.85}" fill="url(#policy-blue-glow)"/>
     <ellipse cx="1190" cy="${height * 0.8}" rx="560" ry="${height * 0.9}" fill="url(#policy-violet-glow)"/>
     <path d="M-100 ${height * 0.85} C360 ${height * 0.1} 740 ${height * 1.2} 1500 ${height * 0.15}"
-      fill="none" stroke="${dark ? "#c5cad4" : "#759bea"}" stroke-opacity="${dark ? 0.22 : 0.16}"
-      stroke-width="140" filter="url(#policy-curve-soften)"/>
+      fill="none" stroke="${dark ? "#c5cad4" : "#759bea"}" stroke-opacity="${dark ? 0.14 : 0.1}"
+      stroke-width="140" stroke-linecap="round" filter="url(#policy-curve-soften)"/>
     <rect width="${WIDTH}" height="${height}" fill="url(#policy-dots)" opacity="${dark ? 0.17 : 0.15}"/>
   </g>`;
   const definitions = `<defs>
     <clipPath id="policy-canvas"><rect width="${WIDTH}" height="${height}" rx="12"/></clipPath>
-    <filter id="policy-curve-soften" x="-15%" y="-60%" width="130%" height="220%">
-      <feGaussianBlur stdDeviation="18"/>
+    <filter id="policy-curve-soften" filterUnits="userSpaceOnUse" x="-200" y="-200"
+      width="${WIDTH + 400}" height="${height + 400}" color-interpolation-filters="sRGB">
+      <feGaussianBlur stdDeviation="38"/>
     </filter>
     <radialGradient id="policy-blue-glow">
       <stop stop-color="#60a5fa" stop-opacity="${dark ? 0.035 : 0.18}"/>

@@ -39,10 +39,9 @@ function decisionRow(
         flexDirection: "column",
         gap: 5,
         padding: "9px 14px",
-        marginBottom: 10,
-        border: `1px solid ${highlighted ? palette.highlight.border : palette.border}`,
+        border: `1px solid ${highlighted ? palette.highlight.border : `${palette.blue}18`}`,
         borderRadius: 7,
-        background: highlighted ? palette.highlight.background : palette.raised,
+        background: highlighted ? palette.highlight.background : "transparent",
       },
     },
     element(
@@ -50,8 +49,8 @@ function decisionRow(
       {
         style: {
           display: "flex",
-          color: highlighted ? palette.highlight.text : palette.text,
-          fontSize: 18,
+          color: palette.text,
+          fontSize: 16,
           fontWeight: 700,
         },
       },
@@ -62,7 +61,7 @@ function decisionRow(
       {
         style: {
           display: "flex",
-          color: highlighted ? palette.highlight.text : palette.muted,
+          color: palette.muted,
           fontSize: 16,
           lineHeight: 1.35,
         },
@@ -75,7 +74,7 @@ function decisionRow(
 function outcomeRow(label: string, detail: string, palette: DiagramPalette): JSXElement {
   return element(
     "div",
-    { style: { display: "flex", alignItems: "center", gap: 12, marginBottom: 10 } },
+    { style: { display: "flex", alignItems: "center", gap: 12 } },
     element(
       "div",
       {
@@ -117,7 +116,7 @@ export function onboardingDiagram(theme: Theme): JSXElement {
 
   return canvas(
     palette,
-    diagramHeader("01", "Project onboarding", palette),
+    diagramHeader("Project onboarding", palette),
     element(
       "div",
       { style: { display: "flex", alignItems: "center" } },
@@ -167,7 +166,7 @@ export function evaluationDiagram(theme: Theme): JSXElement {
 
   return canvas(
     palette,
-    diagramHeader("02", "Action evaluation", palette),
+    diagramHeader("Action evaluation", palette),
     element(
       "div",
       { style: { display: "flex", alignItems: "center" } },
@@ -213,7 +212,6 @@ export function evaluationDiagram(theme: Theme): JSXElement {
               display: "flex",
               flexDirection: "column",
               gap: 6,
-              marginTop: "auto",
               paddingTop: 14,
               borderTop: `1px solid ${palette.border}`,
             },
@@ -252,7 +250,7 @@ export function evaluationDiagram(theme: Theme): JSXElement {
 function codeBlock(lines: readonly SyntaxRow[], caption: string, palette: Palette): JSXElement {
   return element(
     "div",
-    { style: { display: "flex", flexDirection: "column", flex: 1 } },
+    { style: { display: "flex", flexDirection: "column" } },
     element(
       "div",
       {
@@ -287,7 +285,7 @@ function codeBlock(lines: readonly SyntaxRow[], caption: string, palette: Palett
       {
         style: {
           display: "flex",
-          marginTop: "auto",
+          marginTop: 16,
           paddingTop: 16,
           borderTop: `1px solid ${palette.border}`,
           color: palette.muted,
@@ -348,7 +346,7 @@ export function compilationDiagram(theme: Theme): JSXElement {
 
   return canvas(
     palette,
-    diagramHeader("03", "From standard to rule", palette),
+    diagramHeader("From standard to rule", palette),
     element(
       "div",
       { style: { display: "flex", alignItems: "center" } },
@@ -359,7 +357,11 @@ export function compilationDiagram(theme: Theme): JSXElement {
         632,
         440,
         palette,
-        codeBlock(standard, "Code fences excluded.", palette),
+        codeBlock(
+          standard,
+          "The instruction becomes a rule. The fenced example is excluded.",
+          palette,
+        ),
       ),
       connector(palette, 54),
       stageCard(
@@ -369,10 +371,18 @@ export function compilationDiagram(theme: Theme): JSXElement {
         632,
         440,
         palette,
-        codeBlock(policy, "Compiled policy excerpt.", palette),
+        codeBlock(
+          policy,
+          '"hard" marks a prohibition. The zeros link to its source and heading.',
+          palette,
+        ),
       ),
     ),
-    diagramNote("Example", "Action + user authorization accompany the policy.", palette),
+    diagramNote(
+      "Traceable policy",
+      "Rules retain their source, heading context, and precedence so decisions can cite the original instruction.",
+      palette,
+    ),
   );
 }
 

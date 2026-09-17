@@ -19,7 +19,6 @@ export interface DiagramPalette extends Palette {
   readonly highlight: {
     readonly background: string;
     readonly border: string;
-    readonly text: string;
   };
 }
 
@@ -55,9 +54,8 @@ export function diagramPalette(theme: Theme): DiagramPalette {
     line: palette.muted,
     raised: theme === "light" ? "rgba(255, 255, 255, 0.64)" : "rgba(0, 0, 0, 0.3)",
     highlight: {
-      background: theme === "dark" ? "rgba(255, 255, 255, 0.12)" : "rgba(17, 24, 39, 0.07)",
-      border: theme === "dark" ? "rgba(255, 255, 255, 0.22)" : "rgba(17, 24, 39, 0.12)",
-      text: palette.text,
+      background: theme === "dark" ? "rgba(255, 255, 255, 0.045)" : "rgba(255, 255, 255, 0.28)",
+      border: theme === "dark" ? "rgba(255, 255, 255, 0.07)" : "rgba(17, 24, 39, 0.065)",
     },
   };
 }
