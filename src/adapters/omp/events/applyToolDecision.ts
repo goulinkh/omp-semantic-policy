@@ -1,7 +1,7 @@
 import type { ExtensionContext, ToolCallEventResult } from "@oh-my-pi/pi-coding-agent";
 import type { PolicyDecision } from "../../../policy/index.js";
+import { POLICY_NAME, brandPolicyText } from "../policyIdentity.js";
 
-const POLICY_DIALOG_TITLE = "OMP Semantic Policy";
 export interface OmpDecisionContext {
   readonly hasUI: ExtensionContext["hasUI"];
   readonly ui: Pick<ExtensionContext["ui"], "confirm">;
@@ -16,21 +16,26 @@ export async function applyOmpToolDecision(
     case "allow":
       return undefined;
     case "deny":
-      return { block: true, reason: decision.reason };
+      return { block: true, reason: brandPolicyText(decision.reason) };
     case "revise":
       return { input: { ...decision.input } };
     case "prompt": {
       if (!context.hasUI) {
         return {
           block: true,
-          reason: `Policy approval required but no interactive UI is available: ${decision.reason}`,
+          reason: brandPolicyText(
+            `Policy approval required but no interactive UI is available: ${decision.reason}`,
+          ),
         };
       }
 
-      const approved = await context.ui.confirm(POLICY_DIALOG_TITLE, decision.reason);
+      const approved = await context.ui.confirm(POLICY_NAME, decision.reason);
       return approved
         ? undefined
-        : { block: true, reason: `User denied policy approval: ${decision.reason}` };
+        : {
+            block: true,
+            reason: brandPolicyText(`User denied policy approval: ${decision.reason}`),
+          };
     }
   }
 }

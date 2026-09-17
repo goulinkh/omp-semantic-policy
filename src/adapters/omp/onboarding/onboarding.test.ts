@@ -48,7 +48,7 @@ describe("project onboarding", () => {
     expect(refreshed.kind === "ready" && refreshed.snapshotId).not.toBe(firstSnapshotId);
 
     const root = refreshed.kind === "ready" ? refreshed.projectRoot : undefined;
-    expect(formatProjectPolicyStatus(repository, root)).toContain("State: active");
+    expect(formatProjectPolicyStatus(repository, root)).toContain("Policy active");
     expect(formatProjectPolicyReview(repository, root)).toContain("Never push automatically.");
 
     if (root !== undefined) {

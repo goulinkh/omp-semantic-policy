@@ -1,9 +1,11 @@
 import {
   getAgentDir,
+  logger,
   type ExtensionAPI,
   type ExtensionContext,
   type ToolInfo,
 } from "@oh-my-pi/pi-coding-agent";
+import { Loader } from "@oh-my-pi/pi-tui";
 import { randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { join } from "node:path";
@@ -24,41 +26,59 @@ import {
   TYPESAFE_QUESTION_VERSION,
   TYPESAFE_THRESHOLD_VERSION,
 } from "../../typesafe/index.js";
+import {
+  getPolicyArgumentCompletions,
+  parsePolicyCommandArguments,
+} from "../commands/policyCommand.js";
 import { formatCoverageReport } from "../coverage/formatCoverageReport.js";
 import { applyOmpToolDecision } from "../events/applyToolDecision.js";
 import { normalizeOmpToolCall } from "../events/normalizeToolCall.js";
 import {
   createProjectOnboarder,
+  createStandardsSourceResolver,
   formatProjectPolicyReview,
   formatProjectPolicyStatus,
+  type StandardsModelCompletion,
 } from "../onboarding/index.js";
 import { createPolicyRepository, type PolicyRepository } from "../persistence/index.js";
 import { evaluateSnapshotPolicy } from "../enforcement/evaluateSnapshotPolicy.js";
+import { POLICY_LOGO, POLICY_NAME, brandPolicyText } from "../policyIdentity.js";
+import { createDefaultModelStandardsCompletion } from "./createDefaultModelStandardsCompletion.js";
+import {
+  createPolicyStatusBarController,
+  formatPolicyDecisionFeedback,
+  stylePolicyDecisionFeedback,
+  loadPolicyRuntimeSettings,
+  type PolicyRuntimeSettings,
+} from "./policyPresentation.js";
 
 const STATUS_KEY = "omp-semantic-policy";
-const MUTATING_SLASH_COMMANDS: Readonly<Record<string, true>> = {
-  branch: true,
-  clear: true,
-  compact: true,
-  fork: true,
-  login: true,
-  logout: true,
-  model: true,
-  new: true,
-  reload: true,
-  "reload-plugins": true,
-  resume: true,
-  settings: true,
-};
+const MANUAL_ONBOARDING_START_DELAY_MS = 25;
+const ONBOARDING_WIDGET_KEY = "omp-semantic-policy-onboarding";
+const ONBOARDING_PROGRESS_MESSAGE = "Discovering policy sources and compiling snapshot…";
 
 interface PendingAction {
   readonly action: PolicyAction;
   readonly snapshot?: PolicySnapshot;
 }
+type SemanticEvaluatorState =
+  | "available"
+  | "unavailable"
+  | "disabled"
+  | "login-required"
+  | undefined;
+type SemanticEvaluatorIssue =
+  | "consent-disabled"
+  | "login-required"
+  | "credential-resolution-failed"
+  | "evaluation-failed"
+  | undefined;
 export interface OmpPolicyRuntimeOptions {
   readonly databasePath?: string;
   readonly profileInstructionPaths?: readonly string[];
   readonly createPolicyModel?: (apiKey: string, hasConsent: () => boolean) => PolicyModel;
+  readonly standardsCompletion?: StandardsModelCompletion;
+  readonly runtimeSettings?: Partial<PolicyRuntimeSettings>;
 }
 
 export function registerOmpPolicyRuntime(
@@ -76,10 +96,44 @@ export function registerOmpPolicyRuntime(
   let consentPromptActive = false;
   let lastContinuationTurn: number | undefined;
   let cachedModel: { readonly apiKey: string; readonly model: PolicyModel } | undefined;
+  let semanticEvaluatorState: SemanticEvaluatorState;
+  let semanticEvaluatorIssue: SemanticEvaluatorIssue;
+  let standardsContext: ExtensionContext | undefined;
+  let runtimeSystemPrompt: readonly string[] | undefined;
+  let runtimeSettings: PolicyRuntimeSettings = {
+    showStatus: true,
+    showViolationFeedback: true,
+    confirmationDefault: "deny",
+    disabledToolCalls: [],
+    enabledToolCalls: [],
+    confirmationThreshold: 1,
+  };
+  let disabledToolCallNames = new Set<string>();
+  let enabledToolCallNames = new Set<string>();
+  let manualOnboardingRunning = false;
+  let onboardingQueue: Promise<void> = Promise.resolve();
+  const statusBarController = createPolicyStatusBarController();
+  statusBarController.configure(options.runtimeSettings?.showStatus !== false);
+  const standardsSourceResolver = createStandardsSourceResolver({
+    complete:
+      options.standardsCompletion ?? createDefaultModelStandardsCompletion(() => standardsContext),
+    getRuntimeContext: () => runtimeSystemPrompt ?? standardsContext?.getSystemPrompt?.() ?? [],
+    sanitize: redactText,
+  });
 
-  pi.setLabel("OMP Semantic Policy");
+  pi.setLabel(POLICY_NAME);
+  function refreshStatus(context: ExtensionContext, repository: PolicyRepository): void {
+    updateStatus(
+      context,
+      repository,
+      activeProjectRoot,
+      runtimeSettings.showStatus,
+      semanticEvaluatorState,
+    );
+  }
 
-  async function onboard(context: ExtensionContext, force = false): Promise<void> {
+  async function performOnboarding(context: ExtensionContext, force: boolean): Promise<void> {
+    standardsContext = context;
     const repository = await repositoryPromise;
     const onboarder = createProjectOnboarder({
       repository,
@@ -89,6 +143,7 @@ export function registerOmpPolicyRuntime(
         thresholds: TYPESAFE_THRESHOLD_VERSION,
         model: DEFAULT_TYPESAFE_POLICY_MODEL,
       },
+      standardsSourceResolver,
     });
     const result = await onboarder.onboard(context.cwd, force);
     activeProjectRoot = result.kind === "ready" ? result.projectRoot : undefined;
@@ -97,7 +152,7 @@ export function registerOmpPolicyRuntime(
       consentPromptActive = true;
       try {
         const consented = await context.ui.confirm(
-          "OMP Semantic Policy",
+          POLICY_NAME,
           "Allow redacted policy rules, action metadata, and current-turn authorization summaries to be evaluated by TypeSafe AI? Raw tool inputs are never sent.",
         );
         repository.setRemoteConsent(consented);
@@ -106,7 +161,19 @@ export function registerOmpPolicyRuntime(
       }
     }
 
-    updateStatus(context, repository, activeProjectRoot);
+    if (manualOnboardingRunning && runtimeSettings.showStatus) {
+      context.ui.setStatus(STATUS_KEY, `${POLICY_LOGO} onboarding…`);
+    } else {
+      refreshStatus(context, repository);
+    }
+  }
+
+  async function onboard(context: ExtensionContext, force = false): Promise<void> {
+    const scheduled = onboardingQueue
+      .catch(() => undefined)
+      .then(() => performOnboarding(context, force));
+    onboardingQueue = scheduled;
+    await scheduled;
   }
 
   async function ensureSnapshot(
@@ -129,6 +196,8 @@ export function registerOmpPolicyRuntime(
     signal?: AbortSignal,
   ): Promise<PolicyModel | undefined> {
     if (repository.getRemoteConsent() !== true) {
+      semanticEvaluatorState = "disabled";
+      semanticEvaluatorIssue = "consent-disabled";
       return undefined;
     }
     try {
@@ -138,8 +207,11 @@ export function registerOmpPolicyRuntime(
         signal === undefined ? {} : { signal },
       );
       if (apiKey === undefined || apiKey.trim().length === 0) {
+        semanticEvaluatorState = "login-required";
+        semanticEvaluatorIssue = "login-required";
         return undefined;
       }
+      semanticEvaluatorIssue = undefined;
       if (cachedModel?.apiKey === apiKey) {
         return cachedModel.model;
       }
@@ -148,10 +220,17 @@ export function registerOmpPolicyRuntime(
         createTypeSafePolicyModel({
           apiKey,
           hasConsent: () => repository.getRemoteConsent() === true,
+          onError: (error) => {
+            logger.warn("TypeSafe policy evaluation failed", {
+              error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+            });
+          },
         });
       cachedModel = { apiKey, model };
       return model;
     } catch {
+      semanticEvaluatorState = "unavailable";
+      semanticEvaluatorIssue = "credential-resolution-failed";
       return undefined;
     }
   }
@@ -165,7 +244,7 @@ export function registerOmpPolicyRuntime(
     const { repository, snapshot } = await ensureSnapshot(context, action.operation);
     const model =
       snapshot === undefined ? undefined : await resolvePolicyModel(context, repository, signal);
-    const decision = await evaluateSnapshotPolicy({
+    const evaluatedDecision = await evaluateSnapshotPolicy({
       action,
       context: {
         headless: !context.hasUI,
@@ -177,33 +256,143 @@ export function registerOmpPolicyRuntime(
       ...(snapshot === undefined ? {} : { snapshot }),
       ...(model === undefined ? {} : { model }),
       ...(signal === undefined ? {} : { signal }),
+      confirmation: {
+        defaultAction: runtimeSettings.confirmationDefault,
+        threshold: runtimeSettings.confirmationThreshold,
+      },
     });
+    if (repository.getRemoteConsent() !== true) {
+      semanticEvaluatorState = "disabled";
+    } else if (model === undefined) {
+      semanticEvaluatorState =
+        semanticEvaluatorIssue === "login-required" ? "login-required" : "unavailable";
+    } else if (evaluatedDecision.evidence.source !== "fallback") {
+      semanticEvaluatorState = "available";
+    } else {
+      semanticEvaluatorState = "unavailable";
+      semanticEvaluatorIssue = "evaluation-failed";
+    }
+    const decision = clarifyUnavailableEvaluator(evaluatedDecision, action, semanticEvaluatorIssue);
+    refreshStatus(context, repository);
+    const feedback = formatPolicyDecisionFeedback(decision);
+    if (runtimeSettings.showViolationFeedback && context.hasUI && feedback !== undefined) {
+      context.ui.notify(stylePolicyDecisionFeedback(feedback, decision, context.ui.theme), "info");
+    }
     if (activeProjectRoot !== undefined) {
       repository.appendAudit(createDecisionAudit(activeProjectRoot, action, decision, snapshot));
     }
     return { decision, ...(snapshot === undefined ? {} : { snapshot }) };
   }
 
+  function startManualOnboarding(context: ExtensionContext): void {
+    context.ui.setEditorText("");
+    if (manualOnboardingRunning) {
+      context.ui.notify(brandPolicyText("Policy onboarding is already in progress."), "info");
+      return;
+    }
+
+    manualOnboardingRunning = true;
+    context.ui.setWidget(
+      ONBOARDING_WIDGET_KEY,
+      (tui, theme) =>
+        new Loader(
+          tui,
+          (spinner) => theme.fg("accent", spinner),
+          (message) => theme.fg("muted", message),
+          ONBOARDING_PROGRESS_MESSAGE,
+          theme.spinnerFrames,
+        ),
+      { placement: "aboveEditor" },
+    );
+    context.ui.notify(brandPolicyText("Policy onboarding started."), "info");
+    if (runtimeSettings.showStatus) {
+      context.ui.setStatus(STATUS_KEY, `${POLICY_LOGO} onboarding…`);
+    }
+    let completed = false;
+    context.setTimeout(async () => {
+      try {
+        const repository = await repositoryPromise;
+        await onboard(context, true);
+        completed = true;
+        context.ui.notify(
+          formatProjectPolicyStatus(repository, activeProjectRoot, semanticEvaluatorState),
+          "info",
+        );
+      } catch (error) {
+        if (runtimeSettings.showStatus) {
+          context.ui.setStatus(STATUS_KEY, `${POLICY_LOGO} fallback · onboarding failed`);
+        }
+        context.ui.notify(
+          brandPolicyText(
+            `Policy onboarding failed: ${error instanceof Error ? error.message : String(error)}`,
+          ),
+          "error",
+        );
+      } finally {
+        manualOnboardingRunning = false;
+        if (completed) {
+          refreshStatus(context, await repositoryPromise);
+        }
+        context.ui.setWidget(ONBOARDING_WIDGET_KEY, undefined);
+        clearCompletedOnboardingEditor(context);
+      }
+    }, MANUAL_ONBOARDING_START_DELAY_MS);
+  }
+
+  function scheduleAutomaticOnboarding(context: ExtensionContext): void {
+    context.setTimeout(async () => {
+      try {
+        await onboard(context);
+      } catch {
+        if (runtimeSettings.showStatus) {
+          context.ui.setStatus(STATUS_KEY, `${POLICY_LOGO} fallback · onboarding failed`);
+        }
+      }
+    });
+  }
+
   async function initialize(context: ExtensionContext): Promise<void> {
-    try {
-      await onboard(context);
-    } catch {
-      context.ui.setStatus(STATUS_KEY, "policy: fallback (onboarding failed)");
+    runtimeSettings = await loadPolicyRuntimeSettings(context.cwd, options.runtimeSettings);
+    disabledToolCallNames = new Set(runtimeSettings.disabledToolCalls);
+    enabledToolCallNames = new Set(runtimeSettings.enabledToolCalls);
+    statusBarController.configure(runtimeSettings.showStatus);
+    if (!runtimeSettings.showStatus) {
+      context.ui.setStatus(STATUS_KEY, undefined);
+    }
+    runtimeSystemPrompt = context.getSystemPrompt?.() ?? [];
+    // Do not block OMP's input routing on model-assisted discovery. A command can
+    // now render progress immediately while automatic onboarding continues.
+    if (isOnboardingCommand(context.ui.getEditorText())) {
+      startManualOnboarding(context);
+    } else {
+      scheduleAutomaticOnboarding(context);
     }
   }
 
   pi.on("session_start", async (_event, context) => initialize(context));
   pi.on("session_switch", async (_event, context) => initialize(context));
 
-  pi.on("before_agent_start", (event) => {
+  pi.on("before_agent_start", async (event, context) => {
     authorization = {
       source: "current-turn",
       explicit: true,
       summary: redactText(event.prompt).slice(0, 1_000),
     };
+    runtimeSystemPrompt = event.systemPrompt;
+    try {
+      await onboard(context);
+    } catch {
+      context.ui.setStatus(STATUS_KEY, `${POLICY_LOGO} fallback · onboarding failed`);
+    }
   });
 
   pi.on("tool_call", async (event, context) => {
+    if (
+      disabledToolCallNames.has(event.toolName) ||
+      (enabledToolCallNames.size > 0 && !enabledToolCallNames.has(event.toolName))
+    ) {
+      return;
+    }
     const action = normalizeOmpToolCall(event, context, {
       toolInfo: findToolInfo(pi, toolInfoByName, event.toolName),
     });
@@ -236,7 +425,7 @@ export function registerOmpPolicyRuntime(
     ) {
       const repository = await repositoryPromise;
       repository.markStale(pending.snapshot.projectRoot);
-      updateStatus(context, repository, activeProjectRoot);
+      refreshStatus(context, repository);
     }
   });
 
@@ -284,33 +473,6 @@ export function registerOmpPolicyRuntime(
     return { result: blockedPythonResult(decision) };
   });
 
-  pi.on("input", async (event, context) => {
-    const match = event.text.match(/^\/([^\s]+)(?:\s|$)/u);
-    const command = match?.[1]?.toLowerCase();
-    if (command === undefined || MUTATING_SLASH_COMMANDS[command] !== true) {
-      return;
-    }
-    const action = createDirectAction(
-      "command",
-      event.text,
-      context.cwd,
-      context.sessionManager.getSessionId(),
-      `slash:${command}`,
-    );
-    const { decision, snapshot } = await evaluateAction(
-      action,
-      context,
-      undefined,
-      currentTurnAuthorization(event.text),
-    );
-    if (await decisionAllowsExecution(decision, context)) {
-      return;
-    }
-    await recordOutcome(action, snapshot, context, "blocked");
-    context.ui.notify(decisionReason(decision), "warning");
-    return { handled: true };
-  });
-
   pi.on("session_stop", async (event, context) => {
     const action: PolicyAction = {
       id: `session-stop:${event.session_id}:${event.turn_id}`,
@@ -331,30 +493,37 @@ export function registerOmpPolicyRuntime(
   });
 
   pi.registerCommand("policy", {
-    description: "Onboard, inspect, or configure semantic policy",
+    description: `${POLICY_LOGO} Onboard, inspect, or configure semantic policy`,
+    getArgumentCompletions: getPolicyArgumentCompletions,
     handler: async (args, context) => {
-      const repository = await repositoryPromise;
-      const [command = "status", value] = args.trim().split(/\s+/u);
+      const { command, value } = parsePolicyCommandArguments(args);
       if (command === "coverage") {
         context.ui.notify(formatCoverageReport(), "info");
       } else if (command === "onboard") {
-        await onboard(context, true);
-        context.ui.notify(formatProjectPolicyStatus(repository, activeProjectRoot), "info");
+        startManualOnboarding(context);
       } else if (command === "review") {
+        const repository = await repositoryPromise;
         context.ui.notify(formatProjectPolicyReview(repository, activeProjectRoot), "info");
       } else if (command === "consent" && (value === "on" || value === "off")) {
+        const repository = await repositoryPromise;
         repository.setRemoteConsent(value === "on");
+        semanticEvaluatorIssue = value === "on" ? undefined : "consent-disabled";
         cachedModel = undefined;
-        updateStatus(context, repository, activeProjectRoot);
+        semanticEvaluatorState = value === "on" ? undefined : "disabled";
+        refreshStatus(context, repository);
         context.ui.notify(
-          `Remote semantic evaluation ${value === "on" ? "enabled" : "disabled"}.`,
+          brandPolicyText(`Remote semantic evaluation ${value === "on" ? "enabled" : "disabled"}.`),
           "info",
         );
       } else if (command === "status" || command.length === 0) {
-        context.ui.notify(formatProjectPolicyStatus(repository, activeProjectRoot), "info");
+        const repository = await repositoryPromise;
+        context.ui.notify(
+          formatProjectPolicyStatus(repository, activeProjectRoot, semanticEvaluatorState),
+          "info",
+        );
       } else {
         context.ui.notify(
-          "Usage: /policy [status|coverage|onboard|review|consent on|consent off]",
+          brandPolicyText("Usage: /policy [status|review|coverage|onboard|consent on|consent off]"),
           "warning",
         );
       }
@@ -387,7 +556,7 @@ export function registerOmpPolicyRuntime(
       targetSummaries: summarizeTargets(action),
       outcome,
     });
-    updateStatus(context, repository, activeProjectRoot);
+    refreshStatus(context, repository);
   }
 }
 
@@ -462,11 +631,11 @@ async function decisionAllowsExecution(
   if (decision.effect === "deny" || !context.hasUI) {
     return false;
   }
-  return context.ui.confirm("OMP Semantic Policy", decision.reason);
+  return context.ui.confirm(POLICY_NAME, decision.reason);
 }
 
 function blockedBashResult(cwd: string, decision: PolicyDecision) {
-  const output = `Blocked by OMP Semantic Policy: ${decisionReason(decision)}`;
+  const output = brandPolicyText(`Blocked: ${decisionReason(decision)}`);
   const bytes = Buffer.byteLength(output);
   return {
     output,
@@ -482,7 +651,7 @@ function blockedBashResult(cwd: string, decision: PolicyDecision) {
 }
 
 function blockedPythonResult(decision: PolicyDecision) {
-  const output = `Blocked by OMP Semantic Policy: ${decisionReason(decision)}`;
+  const output = brandPolicyText(`Blocked: ${decisionReason(decision)}`);
   const bytes = Buffer.byteLength(output);
   return {
     output,
@@ -502,17 +671,81 @@ function decisionReason(decision: PolicyDecision): string {
   return decision.effect === "allow" ? "Action allowed." : decision.reason;
 }
 
+function isOnboardingCommand(editorText: string): boolean {
+  return /^\/policy\s+onboard\s*$/u.test(editorText.trim());
+}
+
+function clearCompletedOnboardingEditor(context: ExtensionContext): void {
+  const editorText = context.ui.getEditorText();
+  if (editorText.length === 0 || isOnboardingCommand(editorText)) {
+    context.ui.setEditorText("");
+  }
+}
+
+function clarifyUnavailableEvaluator(
+  decision: PolicyDecision,
+  action: PolicyAction,
+  issue: SemanticEvaluatorIssue,
+): PolicyDecision {
+  if (
+    (decision.effect !== "prompt" && decision.effect !== "deny") ||
+    decision.evidence.source !== "fallback"
+  ) {
+    return decision;
+  }
+  const setup = (() => {
+    switch (issue) {
+      case "consent-disabled":
+        return "Remote semantic evaluation is disabled. Run /policy consent on.";
+      case "login-required":
+        return "TypeSafe login required. Run /login typesafe-ai or set TYPESAFE_API_KEY.";
+      case "credential-resolution-failed":
+        return "TypeSafe credential resolution failed. Run /login typesafe-ai to refresh it.";
+      case "evaluation-failed":
+        return "TypeSafe policy evaluation failed. Check network access or run /login typesafe-ai.";
+      case undefined:
+        return undefined;
+    }
+  })();
+  if (setup === undefined) {
+    return decision;
+  }
+  return {
+    ...decision,
+    reason:
+      decision.effect === "prompt"
+        ? `${setup} This ${action.operation} action remains unclassified, so approval is required before ${action.hostAction.name} can run.`
+        : `${setup} This ${action.operation} action remains unclassified and was denied by confirmation settings.`,
+  };
+}
+
 function updateStatus(
   context: ExtensionContext,
   repository: PolicyRepository,
   projectRoot: string | undefined,
+  visible: boolean,
+  semanticEvaluatorState: SemanticEvaluatorState,
 ): void {
+  if (!visible) {
+    context.ui.setStatus(STATUS_KEY, undefined);
+    return;
+  }
   if (projectRoot === undefined) {
-    context.ui.setStatus(STATUS_KEY, "policy: conservative fallback");
+    context.ui.setStatus(STATUS_KEY, `${POLICY_LOGO} conservative fallback`);
     return;
   }
   const project = repository.getProject(projectRoot);
-  context.ui.setStatus(STATUS_KEY, project?.stale === true ? "policy: stale" : "policy: active");
+  if (project?.stale === true) {
+    context.ui.setStatus(STATUS_KEY, `${POLICY_LOGO} stale`);
+  } else if (semanticEvaluatorState === "unavailable") {
+    context.ui.setStatus(STATUS_KEY, `${POLICY_LOGO} evaluator unavailable`);
+  } else if (semanticEvaluatorState === "login-required") {
+    context.ui.setStatus(STATUS_KEY, `${POLICY_LOGO} evaluator login required`);
+  } else if (semanticEvaluatorState === "disabled") {
+    context.ui.setStatus(STATUS_KEY, `${POLICY_LOGO} evaluator disabled`);
+  } else {
+    context.ui.setStatus(STATUS_KEY, `${POLICY_LOGO} active`);
+  }
 }
 
 function findToolInfo(

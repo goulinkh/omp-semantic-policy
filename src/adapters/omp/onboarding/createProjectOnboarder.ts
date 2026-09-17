@@ -1,4 +1,4 @@
-import type { PolicyVersionTuple } from "../../../policy/index.js";
+import type { InstructionSource, PolicyVersionTuple } from "../../../policy/index.js";
 import { compilePolicySnapshot } from "../../../policy/index.js";
 import type { PolicyRepository } from "../persistence/index.js";
 import {
@@ -6,11 +6,13 @@ import {
   discoverProjectInstructionSources,
   findGitProjectRoot,
 } from "../projects/index.js";
+import type { StandardsSourceResolver } from "./createStandardsSourceResolver.js";
 
 export interface ProjectOnboarderOptions {
   readonly repository: PolicyRepository;
   readonly profileInstructionPaths: readonly string[];
   readonly versions: Omit<PolicyVersionTuple, "compiler"> & { readonly compiler?: string };
+  readonly standardsSourceResolver?: StandardsSourceResolver;
 }
 
 export type ProjectOnboardingResult =
@@ -40,9 +42,21 @@ export function createProjectOnboarder(options: ProjectOnboarderOptions): Projec
         discoverProfileInstructionSources(options.profileInstructionPaths),
         discoverProjectInstructionSources(projectRoot),
       ]);
+      const baselineSources = [...profileSources, ...projectSources];
+      let standardsSources: readonly InstructionSource[] = [];
+      try {
+        standardsSources =
+          (await options.standardsSourceResolver?.resolve({
+            projectRoot,
+            existingSources: baselineSources,
+            force,
+          })) ?? [];
+      } catch {
+        standardsSources = [];
+      }
       const snapshot = compilePolicySnapshot({
         projectRoot,
-        sources: [...profileSources, ...projectSources],
+        sources: [...baselineSources, ...standardsSources],
         versions: options.versions,
       });
       const storedProject = options.repository.getProject(projectRoot);

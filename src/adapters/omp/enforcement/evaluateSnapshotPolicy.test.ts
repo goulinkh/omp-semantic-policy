@@ -64,7 +64,84 @@ describe("evaluateSnapshotPolicy", () => {
     });
   });
 
-  test("falls back conservatively when the provider is unavailable", async () => {
+  test("uses friendly confidence bands for confirmation decisions", async () => {
+    const cases = [
+      {
+        confidence: 0.9,
+        reason: "🔐 Confirmation required · high confidence · 90%",
+      },
+      {
+        confidence: 0.81,
+        reason: "⚠️ Confirmation recommended · medium confidence · 81%",
+      },
+      {
+        confidence: 0.64,
+        reason: "🤔 Policy match is uncertain · please confirm · 64%",
+      },
+    ] as const;
+
+    for (const item of cases) {
+      const decision = await evaluateSnapshotPolicy({
+        action: createTestPolicyAction("network"),
+        context: { headless: false },
+        snapshot,
+        model: policyModel({
+          kind: "decision",
+          effect: "prompt",
+          confidence: item.confidence,
+          hardViolationProbability: 0.1,
+          model: "model-v1",
+          usage: { inputTokens: 1, outputTokens: 1 },
+        }),
+        confirmation: { defaultAction: "deny", threshold: 0 },
+      });
+
+      expect(decision.effect).toBe("prompt");
+      expect(decision.effect === "prompt" && decision.reason).toBe(item.reason);
+    }
+  });
+
+  test("automatically denies confirmation requests by default", async () => {
+    const decision = await evaluateSnapshotPolicy({
+      action: createTestPolicyAction("network"),
+      context: { headless: false },
+      snapshot,
+      model: policyModel({
+        kind: "decision",
+        effect: "prompt",
+        confidence: 0.14,
+        hardViolationProbability: 0.1,
+        model: "model-v1",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      }),
+    });
+
+    expect(decision.effect).toBe("deny");
+    expect(decision.effect === "deny" && decision.reason).toBe(
+      "Policy confirmation denied by configuration · low confidence · 14%.",
+    );
+  });
+
+  test("automatically approves below-threshold confirmations when configured", async () => {
+    const decision = await evaluateSnapshotPolicy({
+      action: createTestPolicyAction("network"),
+      context: { headless: false },
+      snapshot,
+      model: policyModel({
+        kind: "decision",
+        effect: "prompt",
+        confidence: 0.79,
+        hardViolationProbability: 0.1,
+        model: "model-v1",
+        usage: { inputTokens: 1, outputTokens: 1 },
+      }),
+      confirmation: { defaultAction: "approve", threshold: 0.8 },
+    });
+
+    expect(decision.effect).toBe("allow");
+  });
+
+  test("automatically denies unavailable-provider confirmations by default", async () => {
     const decision = await evaluateSnapshotPolicy({
       action: createTestPolicyAction("write"),
       context: { headless: true },
@@ -72,8 +149,33 @@ describe("evaluateSnapshotPolicy", () => {
       model: policyModel({ kind: "unavailable", reason: "offline" }),
     });
 
-    expect(decision.effect).toBe("prompt");
+    expect(decision.effect).toBe("deny");
     expect(decision.evidence.source).toBe("fallback");
+  });
+
+  test("does not label an empty-token command as a violation when evaluation is unavailable", async () => {
+    const action = {
+      ...createTestPolicyAction("execute"),
+      targets: [
+        {
+          kind: "command" as const,
+          value: "curl -sS -d 'token=' https://example.com/upload",
+        },
+      ],
+      hostAction: { host: "omp", name: "bash", input: {} },
+    };
+    const decision = await evaluateSnapshotPolicy({
+      action,
+      context: { headless: false },
+      snapshot,
+      confirmation: { defaultAction: "deny", threshold: 0 },
+    });
+
+    expect(decision.effect).toBe("prompt");
+    expect(decision.effect === "prompt" && decision.reason).toContain(
+      "was not classified as compliant or noncompliant",
+    );
+    expect(decision.effect === "prompt" && decision.reason).not.toContain("denied");
   });
 
   test("deterministically allows actions when no compiled rule applies", async () => {

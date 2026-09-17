@@ -1,30 +1,57 @@
+import { homedir } from "node:os";
+import { sep } from "node:path";
+import { POLICY_LOGO, brandPolicyText } from "../policyIdentity.js";
+
 import type { PolicyRepository } from "../persistence/index.js";
 
 export function formatProjectPolicyStatus(
   repository: PolicyRepository,
   projectRoot: string | undefined,
+  evaluatorState: EvaluatorState = undefined,
 ): string {
   if (projectRoot === undefined) {
-    return "No Git project is active; only the conservative fallback is available.";
+    return brandPolicyText("⚠️ No Git project · conservative fallback only");
   }
+  const displayRoot = compactProjectPath(projectRoot);
   const project = repository.getProject(projectRoot);
   if (project === undefined || project.activeSnapshotId === undefined) {
-    return `Project: ${projectRoot}\nPolicy: not onboarded`;
+    return `${brandPolicyText("○ Policy not onboarded")}\n📁 ${displayRoot}`;
   }
   const snapshot = repository.getActiveSnapshot(projectRoot);
   if (snapshot === undefined) {
-    return `Project: ${projectRoot}\nPolicy: invalid active snapshot`;
+    return `${brandPolicyText("❌ Policy unavailable · invalid snapshot")}\n📁 ${displayRoot}`;
   }
   const consent = repository.getRemoteConsent();
+  const state = project.stale ? "⚠️ Policy stale · refresh required" : "✅ Policy active";
   return [
-    `Project: ${projectRoot}`,
-    `Snapshot: ${snapshot.id}`,
-    `State: ${project.stale ? "stale; refresh required before high-impact actions" : "active"}`,
-    `Sources: ${snapshot.sources.length}`,
-    `Rules: ${snapshot.rules.length}`,
-    `Remote semantic evaluation: ${consent === true ? "consented" : "disabled"}`,
-    `Model: ${snapshot.versions.model}`,
+    `${POLICY_LOGO} ${state} · ${snapshot.rules.length} rules · ${snapshot.sources.length} sources`,
+    `📁 ${displayRoot} · 🧠 ${snapshot.versions.model}`,
+    `${consent === true ? "🔐 Remote consented" : "🔒 Remote disabled"} · ${formatEvaluator(evaluatorState)} · ◫ ${snapshot.id.slice(0, 12)}`,
   ].join("\n");
+}
+
+type EvaluatorState = "available" | "unavailable" | "disabled" | "login-required" | undefined;
+
+function formatEvaluator(state: EvaluatorState): string {
+  switch (state) {
+    case "available":
+      return "✅ Evaluator available";
+    case "unavailable":
+      return "⚠️ Evaluator unavailable";
+    case "disabled":
+      return "⏸️ Evaluator disabled";
+    case "login-required":
+      return "🔑 Evaluator login required (/login typesafe-ai or TYPESAFE_API_KEY)";
+    case undefined:
+      return "○ Evaluator not checked";
+  }
+}
+
+function compactProjectPath(projectRoot: string): string {
+  const home = homedir();
+  return projectRoot.startsWith(`${home}${sep}`)
+    ? `~${projectRoot.slice(home.length)}`
+    : projectRoot;
 }
 
 export function formatProjectPolicyReview(
@@ -32,20 +59,20 @@ export function formatProjectPolicyReview(
   projectRoot: string | undefined,
 ): string {
   if (projectRoot === undefined) {
-    return "No Git project is active.";
+    return brandPolicyText("No Git project is active.");
   }
   const snapshot = repository.getActiveSnapshot(projectRoot);
   if (snapshot === undefined) {
-    return "No compiled policy snapshot is active.";
+    return brandPolicyText("No compiled policy snapshot is active.");
   }
   if (snapshot.rules.length === 0) {
-    return "The active policy snapshot contains no instruction rules.";
+    return brandPolicyText("The active policy snapshot contains no instruction rules.");
   }
 
-  return snapshot.rules
+  return `${brandPolicyText("Active policy rules")}\n\n${snapshot.rules
     .map(
       (rule) =>
         `${rule.classification.toUpperCase()} [${rule.sourceKind}:${rule.sourceId}]\n${rule.statement}`,
     )
-    .join("\n\n");
+    .join("\n\n")}`;
 }

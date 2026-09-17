@@ -27,10 +27,49 @@
   "omp": {
     "extensions": [
       "./src/index.ts"
-    ]
+    ],
+    "settings": {
+      "showStatus": {
+        "type": "boolean",
+        "default": true,
+        "description": "Show semantic policy state in OMP's native status bar."
+      },
+      "showViolationFeedback": {
+        "type": "boolean",
+        "default": true,
+        "description": "Show session feedback when policy denies, revises, or requires approval for an action."
+      },
+      "confirmationDefault": {
+        "type": "enum",
+        "values": [
+          "deny",
+          "approve"
+        ],
+        "default": "deny",
+        "description": "Automatically deny or approve confirmation requests that remain below the configured confirmation threshold."
+      },
+      "confirmationThreshold": {
+        "type": "number",
+        "default": 1,
+        "min": 0,
+        "max": 1,
+        "step": 0.05,
+        "description": "Ask for confirmation at or above this confidence. Set 0 to ask for every confirmation request; the default 1 disables dialogs."
+      },
+      "enabledToolCalls": {
+        "type": "string",
+        "default": "",
+        "description": "Comma-separated exact OMP tool names to evaluate. Empty evaluates every tool call; use this as an allowlist when only selected tools need checks."
+      },
+      "disabledToolCalls": {
+        "type": "string",
+        "default": "",
+        "description": "Comma-separated exact OMP tool names that bypass semantic policy evaluation, for example bash. Empty keeps all current enforcement defaults."
+      }
+    }
   },
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --target bun --external @oh-my-pi/pi-coding-agent",
+    "build": "bun build src/index.ts --outdir dist --target bun --external @oh-my-pi/pi-ai --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-tui",
     "check": "bun run format:check && bun run lint && bun run typecheck && bun test && bun run build",
     "format": "oxfmt --write --no-error-on-unmatched-pattern 'src/**/*.ts' 'testing/**/*.ts'",
     "format:check": "oxfmt --check --no-error-on-unmatched-pattern 'src/**/*.ts' 'testing/**/*.ts'",
@@ -47,6 +86,8 @@
     "typescript": "latest"
   },
   "dependencies": {
+    "@oh-my-pi/pi-ai": "18.1.19",
+    "@oh-my-pi/pi-tui": "18.1.19",
     "@typesafe-ai/sdk": "0.6.0"
   }
 }

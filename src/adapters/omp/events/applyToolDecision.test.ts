@@ -22,7 +22,7 @@ describe("applyOmpToolDecision", () => {
 
     await expect(applyOmpToolDecision(decision, context)).resolves.toEqual({
       block: true,
-      reason: "Protected path",
+      reason: "⛨ Protected path",
     });
   });
 
@@ -40,7 +40,7 @@ describe("applyOmpToolDecision", () => {
     await expect(applyOmpToolDecision(decision, context)).resolves.toEqual({
       block: true,
       reason:
-        "Policy approval required but no interactive UI is available: No compiled policy is active",
+        "⛨ Policy approval required but no interactive UI is available: No compiled policy is active",
     });
   });
 
@@ -62,7 +62,7 @@ describe("applyOmpToolDecision", () => {
     } satisfies OmpDecisionContext;
 
     await expect(applyOmpToolDecision(decision, context)).resolves.toBeUndefined();
-    expect(confirmations).toEqual(["OMP Semantic Policy: Allow write?"]);
+    expect(confirmations).toEqual(["⛨ OMP Semantic Policy: Allow write?"]);
   });
 
   it("returns revised input for OMP to revalidate and execute", async () => {
