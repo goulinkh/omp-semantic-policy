@@ -1,7 +1,7 @@
 <svg width="1400" height="620" viewBox="0 0 1400 620" xmlns="http://www.w3.org/2000/svg"><defs>
     <clipPath id="policy-canvas"><rect width="1400" height="620" rx="12"/></clipPath>
     <filter id="policy-curve-soften" x="-15%" y="-60%" width="130%" height="220%">
-      <feGaussianBlur stdDeviation="38"/>
+      <feGaussianBlur stdDeviation="18"/>
     </filter>
     <radialGradient id="policy-blue-glow">
       <stop stop-color="#60a5fa" stop-opacity="0.18"/>
@@ -20,6 +20,7 @@
       <stop offset="1" stop-color="#fff" stop-opacity="0.04"/>
     </linearGradient>
     <filter id="policy-shadow" x="-10%" y="-20%" width="120%" height="150%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="1" stdDeviation="0.65" flood-color="#355078" flood-opacity="0.18"/>
       <feDropShadow dx="0" dy="6" stdDeviation="9" flood-color="#355078" flood-opacity="0.14"/>
     </filter>
     <g id="policy-ambient">
@@ -27,7 +28,7 @@
     <ellipse cx="260" cy="217" rx="640" ry="527" fill="url(#policy-blue-glow)"/>
     <ellipse cx="1190" cy="496" rx="560" ry="558" fill="url(#policy-violet-glow)"/>
     <path d="M-100 527 C360 62 740 744 1500 93"
-      fill="none" stroke="#759bea" stroke-opacity="0.1"
+      fill="none" stroke="#759bea" stroke-opacity="0.16"
       stroke-width="140" filter="url(#policy-curve-soften)"/>
     <rect width="1400" height="620" fill="url(#policy-dots)" opacity="0.15"/>
   </g>

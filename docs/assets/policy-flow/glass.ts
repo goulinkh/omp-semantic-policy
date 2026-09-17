@@ -122,14 +122,14 @@ function glassLayers(theme: Theme, height: number, cards: readonly GlassCard[]):
     <ellipse cx="260" cy="${height * 0.35}" rx="640" ry="${height * 0.85}" fill="url(#policy-blue-glow)"/>
     <ellipse cx="1190" cy="${height * 0.8}" rx="560" ry="${height * 0.9}" fill="url(#policy-violet-glow)"/>
     <path d="M-100 ${height * 0.85} C360 ${height * 0.1} 740 ${height * 1.2} 1500 ${height * 0.15}"
-      fill="none" stroke="${dark ? "#c5cad4" : "#759bea"}" stroke-opacity="${dark ? 0.14 : 0.1}"
+      fill="none" stroke="${dark ? "#c5cad4" : "#759bea"}" stroke-opacity="${dark ? 0.22 : 0.16}"
       stroke-width="140" filter="url(#policy-curve-soften)"/>
     <rect width="${WIDTH}" height="${height}" fill="url(#policy-dots)" opacity="${dark ? 0.17 : 0.15}"/>
   </g>`;
   const definitions = `<defs>
     <clipPath id="policy-canvas"><rect width="${WIDTH}" height="${height}" rx="12"/></clipPath>
     <filter id="policy-curve-soften" x="-15%" y="-60%" width="130%" height="220%">
-      <feGaussianBlur stdDeviation="38"/>
+      <feGaussianBlur stdDeviation="18"/>
     </filter>
     <radialGradient id="policy-blue-glow">
       <stop stop-color="#60a5fa" stop-opacity="${dark ? 0.035 : 0.18}"/>
@@ -148,6 +148,7 @@ function glassLayers(theme: Theme, height: number, cards: readonly GlassCard[]):
       <stop offset="1" stop-color="#fff" stop-opacity="${dark ? 0.02 : 0.04}"/>
     </linearGradient>
     <filter id="policy-shadow" x="-10%" y="-20%" width="120%" height="150%" color-interpolation-filters="sRGB">
+      <feDropShadow dx="0" dy="1" stdDeviation="0.65" flood-color="${dark ? "#000" : "#355078"}" flood-opacity="${dark ? 0.5 : 0.18}"/>
       <feDropShadow dx="0" dy="6" stdDeviation="9" flood-color="${dark ? "#000" : "#355078"}" flood-opacity="${dark ? 0.4 : 0.14}"/>
     </filter>
     ${ambient}
