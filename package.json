@@ -76,6 +76,7 @@
     "lint": "oxlint src testing",
     "test": "bun test",
     "test:e2e:provider": "bun testing/e2e/provider-project.ts",
+    "tune:policy": "bun testing/e2e/policy-tuning.ts",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {
