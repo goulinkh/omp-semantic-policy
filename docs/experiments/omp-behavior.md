@@ -140,6 +140,26 @@ Some core command side effects bypass the registered tool registry. The extensio
 
 The standalone plugin can gate interactive command dispatch. Complete internal-action coverage requires an upstream action hook.
 
+## Experiment 7: marketplace entry point smoke test
+
+### Question
+
+Does OMP load the TypeScript extension entry point and expose the initial operator commands in a clean profile?
+
+### Method
+
+OMP 18.1.19 was launched in a PTY with an isolated `PI_CODING_AGENT_DIR`, ambient extensions disabled, and this repository's `src/index.ts` supplied through `-e`. Provider setup was skipped, leaving the session without a model or credentials. The `/policy status` and `/policy coverage` commands were then executed.
+
+### Observation
+
+The extension loaded without an extension error. The footer displayed `policy: conservative fallback`. `/policy status` reported the active fallback behavior, and `/policy coverage` reported registered tools as enforced, broad execution and restricted subagents as dispatch-gated, and the not-yet-implemented direct shell/Python and slash-command adapters as uncovered.
+
+This smoke test proves extension loading, lifecycle status, and command rendering. It does not prove a real model-issued tool call reached the gate because the isolated profile intentionally had no model credentials.
+
+### Consequence
+
+The marketplace entry shape is compatible with OMP 18.1.19. A credentialed runtime probe remains required to prove pre-effect blocking through the complete agent loop.
+
 ## Evidence quality and next experiments
 
 The Git-boundary result is a runtime observation. Experiments 2–6 are source-backed behavioral findings and should receive executable regression probes when implementation begins.

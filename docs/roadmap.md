@@ -1,5 +1,19 @@
 # Implementation Roadmap
 
+## Current implementation
+
+The first vertical slice is implemented:
+
+- Bun/TypeScript marketplace package and OMP extension entry point;
+- provider-independent action, decision, evaluator, and gate contracts;
+- deterministic-before-semantic evaluator precedence;
+- conservative no-snapshot fallback that allows reads/workflow and requires approval for side effects;
+- OMP registered-tool normalization and decision application;
+- `/policy status` and `/policy coverage`;
+- unit and integration-level contract tests.
+
+Phase 1 remains open for policy snapshots, source provenance, audit records, and the general policy-model provider contract. Later adapter phases remain open where `/policy coverage` reports them as uncovered.
+
 ## Phase 1: package and contracts
 
 - Initialize the TypeScript marketplace plugin without splitting packages.

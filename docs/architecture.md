@@ -27,33 +27,38 @@ host event
 
 Deterministic rules run first. They cover explicit prohibitions, exact path restrictions, project boundaries, protected credentials, and already-resolved user authorization. Model evaluation handles semantic matching, ambiguity, and instruction classification; it must not weaken a deterministic denial.
 
-## Proposed normalized action
+## Normalized action
 
-The exact TypeScript shape remains to be implemented, but the durable fields are:
+The implemented `PolicyAction` records:
 
 - action identifier and timestamp;
-- project and policy-snapshot identifiers;
-- session identifier and parent-session lineage;
-- actor and source: user, agent, subagent, extension, or host;
-- operation class: read, write, execute, delegate, network, workflow, or internal;
-- host operation and normalized targets;
-- structured arguments or a redacted summary;
-- authorization envelope derived from the current user turn;
+- actor plus session and optional parent-session lineage;
+- working directory;
+- operation class: read, write, execute, delegate, network, workflow, internal, or unknown;
+- host operation, structured input, and source metadata when available;
+- normalized targets;
 - interception capability: precise, dispatch-only, advisory, or absent.
 
-The engine must not depend on OMP tool names. OMP-specific parsers translate `write`, `edit`, `bash`, `eval`, `task`, MCP calls, and future tools into the shared operation vocabulary.
+The evaluation context separately carries headless state and optional authorization and snapshot references. Project compilation will populate those references without coupling actions to OMP storage.
+
+The engine does not depend on OMP tool names. The OMP adapter translates `write`, `edit`, `bash`, `eval`, `task`, MCP calls, and future tools into the shared operation vocabulary.
 
 ## Decisions
 
 ```ts
 type PolicyDecision =
-  | { effect: "allow" }
-  | { effect: "prompt"; reason: string }
-  | { effect: "deny"; reason: string }
-  | { effect: "revise"; input: unknown; reason: string };
+  | { effect: "allow"; evidence: DecisionEvidence }
+  | { effect: "prompt"; reason: string; evidence: DecisionEvidence }
+  | { effect: "deny"; reason: string; evidence: DecisionEvidence }
+  | {
+      effect: "revise";
+      input: Readonly<Record<string, unknown>>;
+      reason: string;
+      evidence: DecisionEvidence;
+    };
 ```
 
-A decision records the matched policy clauses, evidence class, model and threshold versions, and whether enforcement occurred before the side effect. User-facing explanations should be concise; the durable audit representation may be richer.
+Decision evidence identifies the evaluator, evidence class, and matched rule identifiers. Model, compiler, question, and threshold versions will enter evidence through compiled snapshot metadata. User-facing explanations stay concise; durable audit records may be richer but must remain redacted.
 
 ## Instruction classification
 
