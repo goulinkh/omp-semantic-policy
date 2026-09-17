@@ -49,7 +49,7 @@ The runtime matrix must eventually verify:
 - `tool_result` records the real outcome;
 - an unrestricted subagent loads the gate and blocks an action;
 - a restricted subagent is reported as dispatch-gated, never enforced;
-- `user_bash`, `user_python`, and slash-command input can be blocked;
+- `user_bash` and `user_python` can be blocked while host-owned utility slash commands bypass policy evaluation;
 - broad `bash` or `eval` behavior is labeled dispatch-gated;
 - unsupported OMP capabilities degrade visibly;
 - teardown removes registrations and transient UI.

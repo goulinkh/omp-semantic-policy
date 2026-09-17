@@ -10,7 +10,7 @@ The marketplace plugin now includes:
 - profile-scoped SQLite migrations, projects, immutable snapshots, consent, stale transitions, and redacted audits;
 - TypeSafe SDK integration, models-list validation, redacted request construction, thresholded decisions, `jev-latest` selection, and conservative provider fallback;
 - automatic onboarding plus `/policy status`, `/policy coverage`, `/policy onboard`, `/policy review`, and `/policy consent`;
-- pre-effect gates for registered tools, direct shell, direct Python, known mutating slash commands, and session-stop workflow checks;
+- pre-effect gates for registered tools, direct shell, direct Python, and session-stop workflow checks;
 - outcome recording through `tool_result`, current-turn authorization capture, and policy-source stale/recompile behavior;
 - automated contract/integration tests and a credential-gated real-provider project end-to-end.
 
@@ -53,14 +53,14 @@ Acceptance: parent instructions above the Git root are excluded, nested reposito
 - Add the TypeSafe policy-model adapter, redaction, thresholding, and cached client reuse.
 - Record the selected backend plus compiler/question/threshold versions in snapshots.
 
-Acceptance: applicable instructions receive a provider decision; ambiguity prompts review; provider failure follows the documented availability behavior.
+Acceptance: applicable instructions receive a provider decision; ambiguity follows the configured automatic default or confirmation threshold; provider failure follows the documented availability behavior.
 
 ## Phase 5: current OMP adapters
 
 - Intercept registered tools through `tool_call`.
 - Record outcomes through `tool_result`.
 - Gate direct shell and Python through `user_bash` and `user_python`.
-- Gate built-in command dispatch through `input`.
+- Leave host-owned utility slash commands outside policy evaluation so recovery operations such as `/login` cannot deadlock behind the evaluator they repair.
 - Capture user authorization in `before_agent_start`.
 - Gate `task` dispatch and preserve child-session lineage.
 - Check workflow obligations at session stop.
@@ -81,7 +81,7 @@ Acceptance: unsupported or bypassable surfaces cannot appear as enforced, and re
 
 Verification exercises both adapters and the actual boundaries:
 
-- automated runtime-harness scenarios cover registered tool decisions, tool outcomes, direct shell, direct Python, mutating slash commands, authorization redaction, audits, and the one-continuation workflow invariant;
+- automated runtime-harness scenarios cover registered tool decisions, tool outcomes, direct shell, direct Python, authorization redaction, audits, and the one-continuation workflow invariant;
 - project-isolation tests cover nearest nested worktrees, `.git` files, symlink canonicalization, dependency exclusions, and subtree applicability;
 - persistence tests cover file modes, migration idempotence, transactional rollback, consent, stale state, snapshots, and redacted audits;
 - an actual OMP 18.1.19 TUI session loads the extension, shows an active snapshot through `/policy status`, intercepts a direct shell command, and returns the synthetic blocked result;

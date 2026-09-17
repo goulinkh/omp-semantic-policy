@@ -91,6 +91,10 @@ When a policy source is modified, the old snapshot governs the mutation that cha
 
 Project identity is the real path of the nearest enclosing Git worktree. Discovery must stop at that root. Nested repositories are separate projects. Nested `AGENTS.md` files are subtree-scoped; user-global instructions are a separate source class rather than an ancestor directory.
 
+Supplemental standards are discovered without repository-specific path conventions. The OMP adapter gives the active/default model a bounded, redacted set of text-document previews plus the effective runtime prompt, which can expose project skills and MCP instructions. Model output is advisory: selected files must match the inventory and resolve to regular files inside the Git root, while runtime excerpts must be exact substrings of the supplied context. Symlinks, nested repositories, generated/dependency directories, ungrounded paths, and invented excerpts are rejected.
+
+The resulting files are loaded locally as project-wide sources with their own provenance. Runtime excerpts use synthetic provenance and never claim a filesystem path. Selection is cached by grounded input, but selected files are reread before compilation. If no model or credential is available, inference fails, or output is invalid, onboarding continues with deterministic profile and `AGENTS.md`/`CLAUDE.md` discovery.
+
 No policy data may be keyed only by the current directory string. Symlink resolution and worktree identity are required to prevent duplicate or cross-project state.
 
 ## Storage
@@ -110,31 +114,42 @@ The first provider integration is TypeSafe:
 
 - provider name: `typesafe-ai`;
 - OMP-native `/login typesafe-ai` and `/logout typesafe-ai`;
-- interactive login reads the key from a user-supplied file because the OMP 18.1.19 extension prompt is not secret-masked;
+- interactive login accepts the token directly and returns it to OMP `AuthStorage`, which persists it with the other provider credentials in `agent.db`;
 - validation using the models-list endpoint, not paid inference;
-- `TYPESAFE_API_KEY` environment fallback;
+- `TYPESAFE_API_KEY` environment fallback when it is actually set, without registering the environment-variable name as a literal credential;
 - one-time profile consent before remote egress;
 - redaction before egress;
-- only applicable instruction statements, normalized action metadata, and redacted current-turn authorization are transmitted.
+- only applicable instruction statements, normalized action metadata, and redacted current-turn authorization are transmitted;
+- large applicable rule sets are partitioned into bounded requests without dropping rules, then combined conservatively.
 
 ## Availability behavior
 
 Local deterministic rules remain available without the remote provider. If semantic evaluation is unavailable:
 
 - reads are allowed unless a deterministic rule protects the target;
-- writes, execution, and delegation prompt in interactive sessions;
-- the same actions deny when prompting is impossible;
-- advisory rules never become blocking due solely to provider failure.
+- model `allow` and `deny` decisions remain authoritative;
+- model confirmation requests automatically use `confirmationDefault` (`deny` by default) unless their confidence reaches the configured `confirmationThreshold`;
+- `confirmationThreshold: 1` disables confirmation dialogs, while `0` keeps the user in the loop for every confirmation request;
+- an unavailable semantic evaluator uses the same confirmation default and is treated as maximum-confidence uncertainty when interactive confirmation is enabled;
+- any remaining prompt denies when the host cannot present confirmation;
 
-Unknown tools follow the same conservative behavior.
+Unknown tools follow the same conservative behavior. Fallback text explicitly says the action was not classified as compliant or noncompliant. It must not present provider unavailability as evidence that a value—such as an empty credential field—is a policy violation. Missing credentials are identified separately as `login required`; feedback directs the user to `/login typesafe-ai` or `TYPESAFE_API_KEY`. Credential-resolution and provider-evaluation failures have distinct safe diagnostics.
+
+## Session presentation
+
+Policy state uses OMP's native `status` segment rather than a separate hook-status row. The plugin adds that segment before the TUI is constructed and exposes `showStatus` through OMP plugin settings. Automatic onboarding runs on OMP's managed timer so model-assisted discovery never blocks startup input routing. Manual onboarding clears the submitted command, publishes a start notification, displays an animated above-editor progress widget, switches to `⛨ onboarding…`, and returns control to the TUI before discovery starts. An exact `/policy onboard` draft is recovered during initialization if startup command routing consumed its first Enter. Onboarding operations are serialized; completion removes the spinner, publishes the compact final report, and repaints an empty composer without discarding a new draft typed during onboarding.
+
+Non-allow decisions emit durable session feedback before host enforcement or confirmation. The `⛨` mark identifies the extension across status text, `/policy` output, notifications, confirmation dialogs, and blocked-action results. Feedback uses theme-native criticality backgrounds: denial uses the error surface, confirmation uses the pending surface, and revision uses the custom-message surface. `showViolationFeedback` is enabled by default and can be disabled through OMP plugin settings. `confirmationDefault` selects `deny` or `approve`; `confirmationThreshold` enables confirmation at or above a confidence from `0` through `<1`, while `1` keeps operation fully automatic. The status segment distinguishes an active snapshot from a disabled, unavailable, or login-required semantic evaluator.
 
 ## Enforced OMP surfaces
 
 - registered tool calls through `tool_call`, with outcomes observed through `tool_result`;
 - direct `!` shell and `$` Python execution through `user_bash` and `user_python`;
-- known mutating slash commands through `input`;
+- OMP utility slash commands intentionally bypass semantic evaluation so login, model, session, and configuration recovery remain available;
 - project workflow completion through `session_stop`, limited to one continuation per turn;
 - unrestricted child sessions when OMP propagates the extension.
+
+Registered tool-call coverage is configurable without changing the defaults. Empty `enabledToolCalls` and `disabledToolCalls` values evaluate every registered tool call. A non-empty `enabledToolCalls` value is a comma-separated exact-name allowlist; calls outside it bypass semantic evaluation. `disabledToolCalls` is a comma-separated exact-name denylist for evaluation and takes precedence when a name appears in both settings. These settings affect registered `tool_call` events only; direct `!` shell, `$` Python, and workflow gates remain independently enforced.
 
 Broad shells and restricted children remain dispatch-gated: their enclosing action is checked, but nested effects cannot be intercepted individually.
 

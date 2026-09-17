@@ -69,7 +69,7 @@ Expected policy outcomes use result values, not exceptions:
 
 Throw only for broken invariants or infrastructure failures that the current layer cannot represent. Preserve the original cause when wrapping errors. Convert errors into redacted operator messages at the OMP adapter boundary.
 
-Never catch and silently allow. For write, execute, delegation, or unknown operations, an unavailable semantic decision prompts interactively and denies when prompting is impossible.
+Never catch and silently allow. For write, execute, delegation, or unknown operations, an unavailable semantic decision follows the configured automatic confirmation default; interactive prompting occurs only when the configured threshold enables it, and headless prompts deny.
 
 ## Async and lifecycle
 

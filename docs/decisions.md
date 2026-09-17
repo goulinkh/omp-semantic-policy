@@ -17,17 +17,25 @@
 ## OMP-native integration
 
 - Register a runtime provider named `typesafe-ai` with `pi.registerProvider(...)`.
-- Use OMP `AuthStorage` through `/login typesafe-ai` and `/logout typesafe-ai`; because OMP 18.1.19 does not expose secret-masked extension prompts, interactive login accepts a path to an API-key file rather than the key itself.
+- Use OMP `AuthStorage` through `/login typesafe-ai` and `/logout typesafe-ai`; interactive login accepts the token directly and OMP stores it in the profile `agent.db` with other provider credentials.
 - Validate credentials with `TypeSafeClient.models.list()` / `GET /v1/models`, avoiding paid inference.
-- Support `TYPESAFE_API_KEY` as a fallback.
-- Request secret-prompt metadata upstream so a future provider login can safely accept credentials directly.
+- Support `TYPESAFE_API_KEY` as a fallback only when the environment variable contains a value; never register its name as a literal credential.
+- Request secret-prompt metadata upstream so direct token input can be masked in a future OMP release.
 - Use OMP marketplace updates and `marketplace.autoUpdate`; do not build a plugin updater.
 
 ## Onboarding
 
 - Automatically onboard the active Git project at session start and session switch.
 - `/policy onboard` performs the same idempotent operation manually.
-- Show active, stale, and fallback state through `ctx.ui.setStatus`; expose details through `/policy status` and `/policy review`.
+- Use OMP's active/default model to identify supplemental standards from bounded, redacted project text previews and effective skill/MCP runtime context; do not encode repository-specific standards paths.
+- Treat model selections as untrusted references: accept only inventoried in-root regular files and exact runtime-context excerpts.
+- Fall back to deterministic profile and `AGENTS.md`/`CLAUDE.md` sources when the model, credentials, completion, or response is unavailable.
+- Show manual onboarding progress immediately and publish the final snapshot report.
+- Put persistent policy state in OMP's native status segment, not a separate footer row; expose the default-on `showStatus` plugin setting.
+- Emit session feedback for deny, prompt, and revise decisions by default; expose `showViolationFeedback` to make it silent.
+- Resolve confirmation requests automatically by default: `confirmationDefault` is `deny` and `confirmationThreshold` is `1`. Users can choose automatic approval or lower the threshold to stay in the confirmation loop.
+- Keep all registered tool calls enabled by default. Expose exact-name `enabledToolCalls` and `disabledToolCalls` settings for explicit coverage overrides, with disabled names taking precedence.
+- Expose details through `/policy status` and `/policy review`.
 - Use the account's production alias `jev-latest`; the live models endpoint on 2026-09-17 exposed `jev-latest` and `jev-preview`, not the researched `jev-1.13.0` identifier.
 - Version model, compiler, policy question, and decision thresholds in every snapshot.
 
@@ -49,6 +57,7 @@
 - Send ambiguous or conflicting instructions to semantic evaluation or conservative review.
 - Let the existing snapshot govern edits to its own policy sources, then recompile before later high-impact actions.
 - Run deterministic applicability checks before semantic model calls.
+- When semantic evaluation is unavailable, say that the action is unclassified and apply the configured confirmation behavior; do not describe provider failure as a policy violation. Distinguish disabled consent, missing login, credential resolution, and provider evaluation so the session gives the exact recovery command.
 
 ## Privacy
 
