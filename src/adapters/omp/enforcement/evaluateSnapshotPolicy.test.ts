@@ -109,58 +109,7 @@ describe("evaluateSnapshotPolicy", () => {
     expect(belowThreshold.evidence.diagnostics?.confirmation.resolution).toBe("automatic-deny");
   });
 
-  test("preserves uncertainty assessment and explains automatic confirmation denial", async () => {
-    for (const rawChoice of ["allow", "prompt", "deny"] as const) {
-      const options = {
-        action: createTestPolicyAction("execute"),
-        context: { headless: false },
-        snapshot,
-        model: policyModel({
-          ...modelDecision("prompt"),
-          confidence: 0.499,
-          diagnostics: {
-            status: "assessed",
-            providerId: "fixture",
-            requestedModel: "model-v1",
-            decisionBasis: "low-confidence",
-            rawChoice,
-          },
-        }),
-      };
-      const interactive = await evaluateSnapshotPolicy({
-        ...options,
-        confirmation: { defaultAction: "deny", threshold: 0 },
-      });
-      const automatic = await evaluateSnapshotPolicy({
-        ...options,
-        confirmation: { defaultAction: "deny", threshold: 1 },
-      });
-      const belowThreshold = await evaluateSnapshotPolicy({
-        ...options,
-        confirmation: { defaultAction: "deny", threshold: 0.8 },
-      });
-      expect(interactive.effect).toBe("prompt");
-      expect(automatic.effect).toBe("deny");
-      expect(belowThreshold.effect).toBe("deny");
-      if (
-        interactive.effect !== "prompt" ||
-        automatic.effect !== "deny" ||
-        belowThreshold.effect !== "deny"
-      ) {
-        throw new Error("Expected confirmation followed by automatic denial");
-      }
-      expect(interactive.reason).toMatch(/uncertain/i);
-      expect(interactive.reason).toContain("49.9%");
-      expect(automatic.reason).toContain(interactive.reason);
-      expect(belowThreshold.reason).toContain(interactive.reason);
-      expect(automatic.reason).toMatch(/configuration.*100%/i);
-      expect(belowThreshold.reason).toMatch(/49.9%.*below.*80%/i);
-      expect(automatic.reason).not.toContain("rule-1");
-      expect(/no violation.*identified/i.test(automatic.reason)).toBe(rawChoice === "allow");
-    }
-  });
-
-  test("distinguishes an explicit deny from a hard override and cites only identified rules", async () => {
+  test("grounded explicit denials and hard overrides survive automatic and maintenance approval", async () => {
     for (const decisionBasis of ["choice", "hard-violation"] as const) {
       const decision = await evaluateSnapshotPolicy({
         action: createTestPolicyAction("execute"),
@@ -183,66 +132,9 @@ describe("evaluateSnapshotPolicy", () => {
         }),
       });
       expect(decision.effect).toBe("deny");
-      if (decision.effect !== "deny") throw new Error("Expected denial");
-      expect(decision.reason).toContain("rule-1");
       expect(decision.evidence.diagnostics?.confirmation.resolution).toBe("not-required");
-      expect(/hard-rule violation/i.test(decision.reason)).toBe(decisionBasis === "hard-violation");
-      if (decisionBasis === "choice") {
-        expect(decision.reason).toMatch(/explicitly.*deny/i);
-        expect(decision.reason).toContain("91%");
-      } else {
-        expect(decision.reason).toContain("80%");
-      }
-    }
-  });
-
-  test("never clears an aggregate assessment when any chunk chose a non-allow outcome", async () => {
-    for (const rawChoice of ["allow", "prompt", "deny"] as const) {
-      const decision = await evaluateSnapshotPolicy({
-        action: createTestPolicyAction("execute"),
-        context: { headless: true },
-        snapshot,
-        confirmation: { defaultAction: "deny", threshold: 1 },
-        model: policyModel({
-          ...modelDecision("prompt"),
-          confidence: 0.499,
-          diagnostics: {
-            status: "assessed",
-            providerId: "fixture",
-            requestedModel: "model-v1",
-            decisionBasis: "chunk-aggregation",
-            aggregation: {
-              strategy: "all-allow-any-deny",
-              totalChunks: 2,
-              assessedChunks: 2,
-              attemptedChunks: 2,
-              concurrencyLimit: 4,
-              complete: true,
-              originalStateBytes: 50_000,
-              totalStateBytes: 51_000,
-            },
-            chunks: (["allow", rawChoice] as const).map((choice, index) => ({
-              index,
-              attempted: true,
-              applicableRuleIds: ["rule-1"],
-              ruleIds: [],
-              stateDigest: `chunk-${index}`,
-              diagnostics: {
-                status: "assessed" as const,
-                providerId: "fixture",
-                requestedModel: "model-v1",
-                decisionBasis: "low-confidence" as const,
-                rawChoice: choice,
-              },
-            })),
-          },
-        }),
-      });
-      expect(decision.effect).toBe("deny");
-      if (decision.effect !== "deny") throw new Error("Expected automatic denial");
-      expect(/no violation.*identified/i.test(decision.reason)).toBe(rawChoice === "allow");
-      expect(decision.reason).toMatch(/uncertain|approval/i);
-      expect(decision.evidence.ruleIds).toEqual([]);
+      expect(decision.evidence.ruleIds).toEqual(["rule-1"]);
+      expect(decision.evidence.diagnostics?.semantic?.decisionBasis).toBe(decisionBasis);
     }
   });
 
@@ -440,7 +332,7 @@ describe("evaluateSnapshotPolicy", () => {
 
   test("maintenance cannot override deny, incomplete, malformed, unavailable, or unassessed evidence", async () => {
     const outcomes: readonly PolicyModelResult[] = [
-      modelDecision("deny"),
+      { ...modelDecision("deny"), ruleIds: ["rule-1"] },
       { kind: "unavailable", reason: "offline" },
       { ...modelDecision("prompt"), confidence: Number.NaN },
       { ...modelDecision("prompt"), ruleIds: ["invented-rule"] },
@@ -486,6 +378,57 @@ describe("evaluateSnapshotPolicy", () => {
       path: "provider-unavailable",
       semantic: { unavailableReason: "missing-snapshot" },
     });
+  });
+
+  test("unattributed semantic denials become uncertainty instead of invented violations", async () => {
+    for (const ruleIds of [[], ["invented-rule"]]) {
+      const options = {
+        action: createTestPolicyAction("write"),
+        snapshot,
+        context: { headless: true },
+        model: policyModel({
+          ...modelDecision("deny"),
+          confidence: 0.25,
+          hardViolationProbability: 0.8,
+          ruleIds,
+        }),
+      };
+      const automatic = await evaluateSnapshotPolicy(options);
+      expect(automatic.effect).toBe("allow");
+      expect(automatic.evidence.ruleIds).toEqual([]);
+      expect(automatic.evidence.diagnostics).toMatchObject({
+        semantic: { adapterEffect: "prompt", decisionBasis: "ungrounded-denial" },
+        confirmation: { resolution: "automatic-approve" },
+      });
+      expect(automatic.evidence.diagnostics?.decisiveRule).toBeUndefined();
+      const strict = await evaluateSnapshotPolicy({
+        ...options,
+        confirmation: { defaultAction: "deny", threshold: 1 },
+      });
+      expect(strict.effect).toBe("deny");
+      expect(strict.evidence.diagnostics?.confirmation.resolution).toBe("automatic-deny");
+    }
+  });
+
+  test("a candidate citation cannot ground a denial when the provider rejects its attribution", async () => {
+    const decision = await evaluateSnapshotPolicy({
+      action: createTestPolicyAction("execute"),
+      snapshot,
+      context: { headless: true },
+      model: policyModel({
+        ...modelDecision("deny"),
+        ruleIds: ["rule-1"],
+        diagnostics: {
+          status: "assessed",
+          providerId: "fixture",
+          requestedModel: "model-v1",
+          attribution: "none",
+        },
+      }),
+    });
+    expect(decision.effect).toBe("allow");
+    expect(decision.evidence.ruleIds).toEqual([]);
+    expect(decision.evidence.diagnostics?.decisiveRule).toBeUndefined();
   });
 
   test("does not attribute all candidates when a model reports no decisive match", async () => {

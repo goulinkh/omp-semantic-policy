@@ -1,9 +1,21 @@
 import type { ExtensionAPI, ExtensionContext, ToolCallEvent } from "@oh-my-pi/pi-coding-agent";
 import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, open, realpath, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { constants } from "node:fs";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  open,
+  realpath,
+  rename,
+  rm,
+  rmdir,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   createPolicyRepository,
@@ -30,6 +42,10 @@ import {
 } from "../../src/policy/index.js";
 
 const DEFAULT_CASES = fileURLToPath(new URL("./policy-tuning-cases.json", import.meta.url));
+const REGRESSION_CASES = fileURLToPath(new URL("./policy-regression-cases.json", import.meta.url));
+const MAX_FIXTURE_FILES = 16;
+const MAX_FIXTURE_BYTES = 128_000;
+const MAX_FIXTURE_TOTAL_BYTES = 512_000;
 const MAX_CORPUS_BYTES = 2_000_000;
 const MAX_RULE_BYTES = 512_000;
 const MAX_CASES = 100;
@@ -54,6 +70,14 @@ interface Options {
   readonly output: string;
   readonly repeat: number;
   readonly rulesFrom?: string;
+  readonly mode: "offline" | "live";
+  readonly confirmationDefault: "approve" | "deny";
+}
+
+interface ExpectedMutation {
+  readonly path: string;
+  readonly before: string;
+  readonly after: string;
 }
 
 interface TuningCase {
@@ -62,6 +86,8 @@ interface TuningCase {
   readonly input: Record<string, Json>;
   readonly request: string;
   readonly expected: Effect;
+  readonly files?: Readonly<Record<string, string>>;
+  readonly expectedMutations?: readonly ExpectedMutation[];
 }
 
 interface Corpus {
@@ -92,6 +118,11 @@ interface CaseResult {
   snapshotId?: string;
   decisionAudit?: PolicyAuditRecord;
   readonly exchanges: Exchange[];
+  automaticUncertaintyApproval: boolean;
+  mutationChecks: {
+    readonly path: string;
+    readonly status: "match" | "mismatch" | "unavailable";
+  }[];
   error?: string;
 }
 
@@ -108,8 +139,9 @@ interface SnapshotIdentity {
 }
 
 interface Report {
-  readonly schemaVersion: 1;
-  readonly mode: "live-handler-dry-run";
+  readonly schemaVersion: 2;
+  readonly mode: "live-handler-dry-run" | "offline-evidence-only";
+  readonly modelAccuracy: "live-assessed-results-only" | "unassessed";
   readonly execution: "suppressed";
   readonly startedAt: string;
   readonly implementationDigest: string;
@@ -130,13 +162,21 @@ interface Report {
     readonly versions: PolicySnapshot["versions"];
     requestCount: number;
   };
-  readonly settings: typeof SETTINGS;
+  readonly settings: Omit<typeof SETTINGS, "confirmationDefault"> & {
+    readonly confirmationDefault: "approve" | "deny";
+  };
   readonly snapshots: SnapshotIdentity[];
   readonly results: CaseResult[];
   summary?: {
     readonly attempts: number;
     readonly matches: number;
     readonly mismatches: number;
+    readonly falseAllows: number;
+    readonly falseDenies: number;
+    readonly automaticUncertaintyApprovals: number;
+    readonly mutationMatches: number;
+    readonly mutationMismatches: number;
+    readonly mutationUnavailable: number;
     readonly unavailable: number;
     readonly unassessed: number;
     readonly errors: number;
@@ -152,7 +192,8 @@ class TuningError extends Error {}
 
 function parseOptions(args: readonly string[]): Options | undefined {
   if (args.length === 1 && args[0] === "--help") return undefined;
-  let live = false;
+  let mode: Options["mode"] | undefined;
+  let confirmationDefault: Options["confirmationDefault"] = "deny";
   let cases = DEFAULT_CASES;
   let output = resolve("policy-tuning-results.json");
   let repeat = 1;
@@ -163,11 +204,14 @@ function parseOptions(args: readonly string[]): Options | undefined {
     if (flag === undefined || seen.has(flag))
       throw new TuningError("Duplicate or malformed option.");
     seen.add(flag);
-    if (flag === "--live") {
-      live = true;
+    if (flag === "--live" || flag === "--offline") {
+      if (mode !== undefined) throw new TuningError("--live and --offline are mutually exclusive.");
+      mode = flag === "--live" ? "live" : "offline";
       continue;
     }
-    if (!["--cases", "--output", "--repeat", "--rules-from"].includes(flag)) {
+    if (
+      !["--cases", "--output", "--repeat", "--rules-from", "--confirmation-default"].includes(flag)
+    ) {
       throw new TuningError("Unknown option. Use --help for the supported flags.");
     }
     const value = args[++index];
@@ -179,7 +223,11 @@ function parseOptions(args: readonly string[]): Options | undefined {
     ) {
       throw new TuningError("Every value option requires one nonempty, control-free argument.");
     }
-    if (flag === "--repeat") {
+    if (flag === "--confirmation-default") {
+      if (value !== "approve" && value !== "deny")
+        throw new TuningError("--confirmation-default must be approve or deny.");
+      confirmationDefault = value;
+    } else if (flag === "--repeat") {
       if (!/^[1-9]\d*$/u.test(value) || Number(value) > MAX_REPEAT) {
         throw new TuningError(`--repeat must be an integer from 1 to ${MAX_REPEAT}.`);
       }
@@ -191,11 +239,18 @@ function parseOptions(args: readonly string[]): Options | undefined {
       if (flag === "--rules-from") rulesFrom = resolve(value);
     }
   }
-  if (!live)
+  if (mode === undefined)
     throw new TuningError(
-      "Live tuning requires --live: redacted policy/action data is sent to TypeSafe and may incur charges.",
+      "Select --offline for evidence-only checks or --live to send redacted data to TypeSafe (may incur charges).",
     );
-  return { cases, output, repeat, ...(rulesFrom === undefined ? {} : { rulesFrom }) };
+  return {
+    cases,
+    output,
+    repeat,
+    mode,
+    confirmationDefault,
+    ...(rulesFrom === undefined ? {} : { rulesFrom }),
+  };
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -239,6 +294,143 @@ function validateJson(value: unknown, budget: { nodes: number }, depth = 0): ass
   throw new TuningError("A case input is not bounded finite JSON.");
 }
 
+function validateFixturePath(path: string): void {
+  const parts = path.split("/");
+  const reserved =
+    /^(?:agents|claude|gemini|policy|config|settings|package|bun|npm|yarn|pnpm|tsconfig|jsconfig|omp-plugins)(?:[.-]|$)/iu;
+  if (
+    path.length > 240 ||
+    parts.length > 8 ||
+    parts.some((part) => !/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/u.test(part) || reserved.test(part)) ||
+    ["normal.txt", "protected.txt", "link", "plugin", "node_modules"].includes(
+      parts[0]?.toLowerCase() ?? "",
+    )
+  ) {
+    throw new TuningError(
+      "Fixture paths must be bounded relative paths without traversal, hidden, policy, configuration, or protected runner components.",
+    );
+  }
+}
+
+function fixtureText(value: unknown): value is string {
+  return (
+    typeof value === "string" &&
+    !value.includes("\u0000") &&
+    Buffer.byteLength(value) <= MAX_FIXTURE_BYTES &&
+    Buffer.from(value, "utf8").toString("utf8") === value
+  );
+}
+
+function parseFixtureFiles(value: unknown): Readonly<Record<string, string>> {
+  if (!isObject(value) || Object.keys(value).length > MAX_FIXTURE_FILES)
+    throw new TuningError(
+      `Case files must be an object with at most ${MAX_FIXTURE_FILES} entries.`,
+    );
+  const entries: [string, string][] = [];
+  const paths: string[] = [];
+  let total = 0;
+  for (const [path, content] of Object.entries(value)) {
+    validateFixturePath(path);
+    if (!fixtureText(content))
+      throw new TuningError(
+        `Fixture contents must be NUL-free UTF-8 text of at most ${MAX_FIXTURE_BYTES} bytes.`,
+      );
+    const folded = path.toLowerCase();
+    if (
+      paths.some(
+        (other) =>
+          other === folded || other.startsWith(`${folded}/`) || folded.startsWith(`${other}/`),
+      )
+    )
+      throw new TuningError(
+        "Fixture file paths must not collide, including case-folded or file/directory collisions.",
+      );
+    paths.push(folded);
+    total += Buffer.byteLength(content);
+    if (total > MAX_FIXTURE_TOTAL_BYTES)
+      throw new TuningError(`Case fixture contents exceed ${MAX_FIXTURE_TOTAL_BYTES} bytes.`);
+    entries.push([path, content]);
+  }
+  return Object.fromEntries(entries);
+}
+
+function parseExpectedMutations(value: unknown): readonly ExpectedMutation[] {
+  if (!Array.isArray(value) || value.length === 0 || value.length > 8)
+    throw new TuningError("expectedMutations must contain 1–8 file expectations.");
+  const paths = new Set<string>();
+  return value.map((entry: unknown) => {
+    if (!isObject(entry)) throw new TuningError("Mutation expectations must be objects.");
+    requireKeys(entry, ["path", "before", "after"]);
+    if (typeof entry.path !== "string")
+      throw new TuningError("Mutation expectations require relative paths.");
+    validateFixturePath(entry.path);
+    if (
+      paths.has(entry.path.toLowerCase()) ||
+      !fixtureText(entry.before) ||
+      !fixtureText(entry.after)
+    )
+      throw new TuningError(
+        "Mutation expectations require unique paths and bounded UTF-8 before/after strings.",
+      );
+    paths.add(entry.path.toLowerCase());
+    return { path: entry.path, before: entry.before, after: entry.after };
+  });
+}
+
+function createCaseFixtures(projectRoot: string) {
+  const files: string[] = [];
+  const directories: string[] = [];
+  async function containedDirectory(path: string): Promise<void> {
+    const info = await lstat(path);
+    const canonical = await realpath(path);
+    const within = relative(projectRoot, canonical);
+    if (
+      !info.isDirectory() ||
+      info.isSymbolicLink() ||
+      (within !== "" &&
+        (within === ".." ||
+          within.startsWith(`..${sep}`) ||
+          resolve(projectRoot, within) !== canonical))
+    )
+      throw new TuningError(
+        "Fixture directory escaped the isolated project or contains a symlink.",
+      );
+  }
+  return {
+    async reset(contents: Readonly<Record<string, string>> = {}): Promise<void> {
+      for (const path of files.splice(0).reverse()) await rm(path);
+      for (const path of directories.splice(0).reverse()) await rmdir(path);
+      await containedDirectory(projectRoot);
+      for (const [path, content] of Object.entries(contents)) {
+        validateFixturePath(path);
+        let parent = projectRoot;
+        for (const part of path.split("/").slice(0, -1)) {
+          parent = join(parent, part);
+          try {
+            await mkdir(parent, { mode: 0o700 });
+            directories.push(parent);
+          } catch (error) {
+            if (!isObject(error) || error.code !== "EEXIST") throw error;
+          }
+          await containedDirectory(parent);
+        }
+        const target = join(projectRoot, path);
+        const file = await open(
+          target,
+          constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | constants.O_NOFOLLOW,
+          0o600,
+        );
+        files.push(target);
+        try {
+          await file.writeFile(content, "utf8");
+        } finally {
+          await file.close();
+        }
+      }
+    },
+  };
+}
+
 function parseCorpus(text: string): Corpus {
   let value: unknown;
   try {
@@ -264,7 +456,8 @@ function parseCorpus(text: string): Corpus {
   const ids = new Set<string>();
   const cases = value.cases.map((item: unknown): TuningCase => {
     if (!isObject(item)) throw new TuningError("Every corpus case must be an object.");
-    requireKeys(item, ["id", "tool", "input", "request", "expected"]);
+    const optionalKeys = ["files", "expectedMutations"].filter((key) => Object.hasOwn(item, key));
+    requireKeys(item, ["id", "tool", "input", "request", "expected", ...optionalKeys]);
     if (
       typeof item.id !== "string" ||
       !/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/u.test(item.id) ||
@@ -294,12 +487,19 @@ function parseCorpus(text: string): Corpus {
     validateJson(item.input, { nodes: 10_000 });
     if (Buffer.byteLength(JSON.stringify(item.input)) > 64_000)
       throw new TuningError("A case input exceeds 64000 UTF-8 bytes.");
+    const files = item.files === undefined ? undefined : parseFixtureFiles(item.files);
+    const expectedMutations =
+      item.expectedMutations === undefined
+        ? undefined
+        : parseExpectedMutations(item.expectedMutations);
     return {
       id: item.id,
       tool: item.tool,
       input: item.input,
       request: item.request,
       expected: item.expected,
+      ...(files === undefined ? {} : { files }),
+      ...(expectedMutations === undefined ? {} : { expectedMutations }),
     };
   });
   return { rules: value.rules, cases };
@@ -477,24 +677,87 @@ function createHost(cwd: string, apiKey: string): Host {
   };
 }
 
+function checkMutations(
+  expected: readonly ExpectedMutation[],
+  context: unknown,
+): CaseResult["mutationChecks"] {
+  const files =
+    isObject(context) && context.phase === "proposed" && Array.isArray(context.files)
+      ? context.files
+      : [];
+  return expected.map((entry) => {
+    const matches = files.filter((file: unknown) => isObject(file) && file.path === entry.path);
+    const file: unknown = matches[0];
+    if (
+      matches.length !== 1 ||
+      !isObject(file) ||
+      file.status !== "included" ||
+      !Array.isArray(file.hunks)
+    )
+      return { path: entry.path, status: "unavailable" };
+    const before: string[] = [];
+    const after: string[] = [];
+    for (const hunk of file.hunks) {
+      if (!isObject(hunk)) return { path: entry.path, status: "mismatch" };
+      for (const side of ["before", "after"] as const) {
+        const range = hunk[side];
+        if (
+          !isObject(range) ||
+          typeof range.text !== "string" ||
+          !Number.isSafeInteger(range.startLine) ||
+          Number(range.startLine) < 1 ||
+          !Number.isSafeInteger(range.lineCount) ||
+          Number(range.lineCount) < 0
+        )
+          return { path: entry.path, status: "mismatch" };
+        (side === "before" ? before : after).push(range.text);
+      }
+    }
+    return {
+      path: entry.path,
+      status:
+        before.join("") === entry.before && after.join("") === entry.after ? "match" : "mismatch",
+    };
+  });
+}
+
 function captureModel(
   apiKey: string,
   hasConsent: () => boolean,
   report: Report,
   current: () => CaseResult | undefined,
   cancellation: AbortSignal,
+  expectations: () => readonly ExpectedMutation[] | undefined,
 ): PolicyModel {
   let activeExchange: Exchange | undefined;
-  const model = createTypeSafePolicyModel({
-    apiKey,
-    hasConsent,
-    timeoutMs: 30_000,
-    async fetch(input, init) {
-      report.provider.requestCount += 1;
-      if (activeExchange !== undefined) activeExchange.requestCount += 1;
-      return await fetch(input, init);
-    },
-  });
+  // The offline delegate captures the runtime's real evidence but never invents a classification.
+  const model: PolicyModel =
+    report.mode === "offline-evidence-only"
+      ? {
+          providerId: "offline-evidence-only",
+          modelVersion: "offline-evidence-only",
+          async validate(signal) {
+            signal?.throwIfAborted();
+            return { model: "offline-evidence-only", availableModels: ["offline-evidence-only"] };
+          },
+          async evaluate(_request, signal) {
+            signal?.throwIfAborted();
+            return {
+              kind: "unavailable",
+              reason: "Offline evidence-only run; model accuracy is unassessed.",
+            };
+          },
+        }
+      : createTypeSafePolicyModel({
+          apiKey,
+          hasConsent,
+          timeoutMs: 30_000,
+          async fetch(input, init) {
+            report.provider.requestCount += 1;
+            if (activeExchange !== undefined) activeExchange.requestCount += 1;
+            return await fetch(input, init);
+          },
+        });
   return {
     providerId: model.providerId,
     modelVersion: model.modelVersion,
@@ -504,6 +767,9 @@ function captureModel(
       const result = current();
       if (result === undefined)
         throw new TuningError("Semantic evaluation occurred outside a corpus case.");
+      const expected = expectations();
+      if (expected !== undefined)
+        result.mutationChecks = checkMutations(expected, request.action.details.mutationContext);
       const state = createRedactedProviderState(request);
       const exchange: Exchange = {
         state,
@@ -614,7 +880,10 @@ async function runCase(
     const actualInput = result.exchanges.at(-1)?.state;
     if (actualInput !== undefined) result.normalized = actualInput;
     result.path = audit?.diagnostics?.path ?? "missing-audit";
-    result.assessment = classifyAssessment(audit);
+    result.automaticUncertaintyApproval =
+      audit?.diagnostics?.confirmation.resolution === "automatic-approve";
+    result.assessment =
+      report.mode === "offline-evidence-only" ? "unassessed" : classifyAssessment(audit);
     if (result.assessment !== "assessed") result.status = result.assessment;
     else if (audit?.effect !== result.enforced)
       throw new TuningError("Runtime enforcement disagreed with its persisted audit.");
@@ -711,6 +980,30 @@ function summarizeReport(report: Report): void {
     attempts: report.results.length,
     matches: count("match"),
     mismatches: count("mismatch"),
+    falseAllows: report.results.filter(
+      (result) => result.status === "mismatch" && result.enforced === "allow",
+    ).length,
+    falseDenies: report.results.filter(
+      (result) => result.status === "mismatch" && result.enforced === "deny",
+    ).length,
+    automaticUncertaintyApprovals: report.results.filter(
+      (result) => result.automaticUncertaintyApproval,
+    ).length,
+    mutationMatches: report.results.reduce(
+      (sum, result) =>
+        sum + result.mutationChecks.filter((check) => check.status === "match").length,
+      0,
+    ),
+    mutationMismatches: report.results.reduce(
+      (sum, result) =>
+        sum + result.mutationChecks.filter((check) => check.status === "mismatch").length,
+      0,
+    ),
+    mutationUnavailable: report.results.reduce(
+      (sum, result) =>
+        sum + result.mutationChecks.filter((check) => check.status === "unavailable").length,
+      0,
+    ),
     unavailable: count("unavailable"),
     unassessed: count("unassessed"),
     errors: count("error"),
@@ -750,7 +1043,7 @@ async function main(): Promise<number> {
   const options = parseOptions(process.argv.slice(2));
   if (options === undefined) {
     console.log(
-      "Usage: bun run tune:policy --live [--cases JSON] [--output JSON] [--repeat 1–20] [--rules-from TEXT]\nDefault output: ./policy-tuning-results.json. At most 100 cases and 500 total attempts.\nCredentials: TYPESAFE_API_KEY, otherwise private omp token typesafe-ai.\nLive TypeSafe evaluation only; proposed tool execution is always suppressed.",
+      "Usage: bun run tune:policy (--offline | --live) [--cases JSON] [--output JSON] [--repeat 1–20] [--rules-from TEXT] [--confirmation-default approve|deny]\nDefault output: ./policy-tuning-results.json. Default confirmation: deny. At most 100 cases and 500 total attempts.\n--offline: evidence-only production-runtime checks; no credentials or network. Model accuracy is unassessed, not scored.\n--live: authorized TypeSafe scoring; redacted policy/action data is sent and may incur charges. Credentials: TYPESAFE_API_KEY, otherwise private omp token typesafe-ai.\nBoth modes suppress proposed tool execution. Optional case fields: files (relative-path -> original UTF-8 contents), expectedMutations ([{path,before,after}]; exact concatenated emitted hunk text). Files reset before every attempt; protected/configuration/hidden paths are rejected. Fixtures: at most 16 files, 128000 bytes/file, 512000 bytes/case.",
     );
     return 0;
   }
@@ -770,18 +1063,24 @@ async function main(): Promise<number> {
     throw new TuningError(`Combined rules exceed ${MAX_RULE_BYTES} UTF-8 bytes.`);
   await mkdir(dirname(options.output), { recursive: true });
   const output = join(await realpath(dirname(options.output)), basename(options.output));
+  const outputIdentity = await realpath(output).catch((error: unknown) => {
+    if (isObject(error) && error.code === "ENOENT") return output;
+    throw error;
+  });
   const protectedPaths = [
     options.cases,
     DEFAULT_CASES,
+    REGRESSION_CASES,
     fileURLToPath(import.meta.url),
     ...(options.rulesFrom === undefined ? [] : [options.rulesFrom]),
   ];
-  if ((await Promise.all(protectedPaths.map((path) => realpath(path)))).includes(output)) {
+  if ((await Promise.all(protectedPaths.map((path) => realpath(path)))).includes(outputIdentity)) {
     throw new TuningError("Evidence output must not overwrite the runner or input files.");
   }
   const report: Report = {
-    schemaVersion: 1,
-    mode: "live-handler-dry-run",
+    schemaVersion: 2,
+    mode: options.mode === "offline" ? "offline-evidence-only" : "live-handler-dry-run",
+    modelAccuracy: options.mode === "offline" ? "unassessed" : "live-assessed-results-only",
     execution: "suppressed",
     startedAt: new Date().toISOString(),
     implementationDigest: await implementationDigest(),
@@ -808,7 +1107,7 @@ async function main(): Promise<number> {
       },
       requestCount: 0,
     },
-    settings: SETTINGS,
+    settings: { ...SETTINGS, confirmationDefault: options.confirmationDefault },
     snapshots: [],
     results: [],
   };
@@ -818,6 +1117,7 @@ async function main(): Promise<number> {
   let host: Host | undefined;
   let repository: PolicyRepository | undefined;
   let current: CaseResult | undefined;
+  let currentExpectations: readonly ExpectedMutation[] | undefined;
   const cancellation = new AbortController();
   const interrupt = () =>
     cancellation.abort(new TuningError("Tuning was interrupted; completed evidence was retained."));
@@ -825,7 +1125,7 @@ async function main(): Promise<number> {
   process.on("SIGTERM", interrupt);
   try {
     await saveReport(output, report, apiKey, fixture, projectRoot);
-    apiKey = await resolveApiKey(cancellation.signal);
+    if (options.mode === "live") apiKey = await resolveApiKey(cancellation.signal);
     fixture = await mkdtemp(join(tmpdir(), "omp-policy-tuning-"));
     fixture = await realpath(fixture);
     projectRoot = join(fixture, "project");
@@ -850,14 +1150,23 @@ async function main(): Promise<number> {
     }
     projectRoot = await realpath(projectRoot);
     const databasePath = join(fixture, "profile", "policy.db");
-    host = createHost(projectRoot, apiKey);
+    // This sentinel only opens the injected local capture seam; no offline credential is retrieved.
+    host = createHost(projectRoot, options.mode === "offline" ? "offline-evidence-only" : apiKey);
+    const caseFixtures = createCaseFixtures(projectRoot);
     registerOmpPolicyRuntime(host.api, {
       databasePath,
       profileInstructionPaths: [],
-      runtimeSettings: SETTINGS,
+      runtimeSettings: report.settings,
       standardsCompletion: async () => undefined,
       createPolicyModel: (key, hasConsent) =>
-        captureModel(key, hasConsent, report, () => current, cancellation.signal),
+        captureModel(
+          key,
+          hasConsent,
+          report,
+          () => current,
+          cancellation.signal,
+          () => currentExpectations,
+        ),
     });
     await host.consent();
     await host.emit("session_start", { type: "session_start" });
@@ -870,6 +1179,8 @@ async function main(): Promise<number> {
       }
       for (const item of corpus.cases) {
         cancellation.signal.throwIfAborted();
+        await caseFixtures.reset(item.files);
+        currentExpectations = item.expectedMutations;
         current = {
           id: item.id,
           repetition,
@@ -882,15 +1193,22 @@ async function main(): Promise<number> {
           providerRequestCount: 0,
           execution: "suppressed",
           exchanges: [],
+          automaticUncertaintyApproval: false,
+          mutationChecks: (item.expectedMutations ?? []).map(({ path }) => ({
+            path,
+            status: "unavailable",
+          })),
         };
         report.results.push(current);
         await runCase(item, current, host, repository, projectRoot, report);
         current = undefined;
+        currentExpectations = undefined;
         summarizeReport(report);
         await saveReport(output, report, apiKey, fixture, projectRoot);
         cancellation.signal.throwIfAborted();
       }
     }
+    await caseFixtures.reset();
     if (report.implementationDigest !== (await implementationDigest())) {
       throw new TuningError(
         "Implementation changed during the run; preserve this report but do not promote it.",
@@ -933,10 +1251,16 @@ async function main(): Promise<number> {
   const summary = report.summary;
   if (summary === undefined) throw new TuningError("Missing tuning summary.");
   console.log(
-    `Policy tuning: ${summary.attempts} attempts, ${summary.matches} matches, ${summary.mismatches} mismatches, ${summary.unavailable} unavailable, ${summary.unassessed} unassessed, ${summary.errors} errors; ${summary.providerRequestCount} TypeSafe requests. Tool execution suppressed.`,
+    `${report.mode}: ${summary.attempts} attempts, ${summary.matches} matches, ${summary.falseAllows} false allows, ${summary.falseDenies} false denies, ${summary.unavailable} unavailable, ${summary.unassessed} unassessed, ${summary.errors} errors; ${summary.automaticUncertaintyApprovals} automatic uncertainty approvals; mutation evidence: ${summary.mutationMatches} matches, ${summary.mutationMismatches} mismatches, ${summary.mutationUnavailable} unavailable; ${summary.providerRequestCount} TypeSafe requests. Model accuracy: ${report.modelAccuracy}. Tool execution suppressed.`,
   );
   if (report.runStatus === "error") console.error(report.error);
-  return report.runStatus === "complete" && summary.matches === corpus.cases.length * options.repeat
+  const evidencePassed = summary.mutationMismatches === 0 && summary.mutationUnavailable === 0;
+  const classificationsPassed =
+    options.mode === "offline" || summary.matches === corpus.cases.length * options.repeat;
+  return report.runStatus === "complete" &&
+    summary.errors === 0 &&
+    evidencePassed &&
+    classificationsPassed
     ? 0
     : 1;
 }

@@ -68,21 +68,35 @@ describe("policy session presentation", () => {
     });
   });
 
-  test("binds feedback to the actual command and call while keeping allowed calls silent", () => {
+  test("keeps action summaries distinct without technical identifiers and keeps allows silent", () => {
     const wc = action("bash", "call-wc", { command: "wc -c dist/index.js" });
     const build = action("bash", "call-build", { command: "bun run build" });
     expect(formatPolicyDecisionFeedback(decision("allow"), wc)).toBeUndefined();
     const blocked = formatPolicyDecisionFeedback(decision("deny"), wc);
-    expect(blocked).toContain("Blocked bash: wc -c dist/index.js");
-    expect(blocked).toContain(wc.id);
-    expect(blocked).not.toContain(build.id);
+    expect(blocked).toContain("wc -c dist/index.js");
+    expect(blocked).not.toContain(wc.id);
+    expect(blocked).not.toContain("bun run build");
     const prompt = formatPolicyDecisionFeedback(decision("prompt"), build);
-    expect(prompt).toContain("bash: bun run build");
-    expect(prompt).toContain(build.id);
+    expect(prompt).toContain("bun run build");
+    expect(prompt).not.toContain(build.id);
     expect(prompt).not.toContain(wc.id);
     expect(blocked).toContain("/policy audit");
     expect(prompt).toContain("/policy audit");
     expect(prompt).not.toContain("/policy maintenance");
+  });
+
+  test("shows the dispatched working directory and override names without environment values", () => {
+    const request = action("bash", "call-marketplace", {
+      command: "omp --profile smoke plugin marketplace add /workspace/project",
+      cwd: "/tmp/marketplace-smoke",
+      env: { HOME: "/private/temporary-home", TYPESAFE_API_KEY: "private-provider-key" },
+    });
+    const feedback = formatPolicyDecisionFeedback(decision("deny"), request);
+    expect(feedback).toContain("/tmp/marketplace-smoke");
+    expect(feedback).toContain("HOME");
+    expect(feedback).toContain("TYPESAFE_API_KEY");
+    expect(feedback).not.toContain("/private/temporary-home");
+    expect(feedback).not.toContain("private-provider-key");
   });
 
   test("redacts credentials and strips terminal injection before displaying bounded feedback", () => {
@@ -113,7 +127,7 @@ describe("policy session presentation", () => {
       expect(feedback).not.toContain(secret);
     const longPath = action("write", "call-long", { path: `/tmp/${"a".repeat(5_000)}` });
     const bounded = formatPolicyDecisionFeedback(decision("deny"), longPath);
-    expect(bounded).toContain(longPath.id);
+    expect(bounded).not.toContain(longPath.id);
     expect(bounded).toContain("/tmp/");
     expect(bounded?.length).toBeLessThan(1_000);
   });
@@ -157,7 +171,9 @@ describe("policy session presentation", () => {
           decisiveRule: {
             ruleId: "hard.rule",
             sourceId: "project-policy",
-            sourcePath: "/project/AGENTS.md",
+            sourcePath: "/workspace/project/docs/standards.md",
+            statement: "Disable access checks.",
+            context: ["Runtime standards", "Preserve authorization", "Don't"],
           },
           confirmation: { resolution: "not-required" },
           enforcedEffect: "deny",
@@ -168,9 +184,14 @@ describe("policy session presentation", () => {
       denied,
       action("write", "call-protected", { path: "/project/AGENTS.md" }),
     );
-    expect(feedback).toContain("hard.rule");
-    expect(feedback).toContain("project-policy");
-    expect(feedback).toContain("/project/AGENTS.md");
+    expect(feedback).toContain("Disable access checks.");
+    expect(feedback).toMatch(/Not allowed: Disable access checks/u);
+    expect(feedback).toContain("Preserve authorization");
+    expect(feedback).toContain("docs/standards.md");
+    expect(feedback).not.toContain("/workspace/project");
+    expect(feedback).not.toContain("hard.rule");
+    expect(feedback).not.toContain("project-policy");
+    expect(feedback).toContain("\n\n");
     expect(feedback).toContain("/policy audit");
     expect(feedback).not.toMatch(/confirm|approve|\/policy maintenance/iu);
   });

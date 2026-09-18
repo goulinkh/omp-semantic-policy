@@ -1,6 +1,7 @@
 import { settings, type ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { getPluginSettings } from "@oh-my-pi/pi-coding-agent/extensibility/plugins";
 import { sanitizeText } from "@oh-my-pi/pi-utils";
+import { basename, isAbsolute, relative } from "node:path";
 import {
   decodeLiteralShellWord,
   SHELL_WORD_PATTERN,
@@ -159,27 +160,81 @@ export function formatPolicyDecisionFeedback(
 ): string | undefined {
   if (decision.effect === "allow") return undefined;
 
-  const verb =
+  const tool = safeFeedbackText(action.hostAction.name, 64);
+  const title =
     decision.effect === "deny"
-      ? "Blocked"
+      ? `${tool} blocked`
       : decision.effect === "prompt"
-        ? "Approval required for"
-        : "Revised";
-  const identity = `${safeFeedbackText(action.hostAction.name, 64)}: ${summarizeAction(action)} [action ${safeFeedbackText(action.id, 160)}]`;
+        ? `Approval needed for ${tool}`
+        : `${tool} revised`;
   const diagnostics = decision.evidence.diagnostics;
+  const resolution = diagnostics?.confirmation.resolution;
+  const confirmationBlocked =
+    resolution === "automatic-deny" ||
+    resolution === "headless-denied" ||
+    resolution === "user-denied" ||
+    (resolution === "pending" && decision.effect === "deny");
   const decisive = diagnostics?.decisiveRule;
-  const provenance =
-    decisive !== undefined && decision.evidence.ruleIds.includes(decisive.ruleId)
-      ? ` Rule ${safeFeedbackText(decisive.ruleId, 120)} · source ${safeFeedbackText(decisive.sourceId, 120)}${decisive.sourcePath === undefined ? "" : ` (${safeFeedbackText(decisive.sourcePath, 180)})`}.`
-      : decision.evidence.ruleIds.length > 0
-        ? ` Rules: ${decision.evidence.ruleIds
-            .slice(0, 3)
-            .map((id) => safeFeedbackText(id, 120))
-            .join(", ")}${decision.evidence.ruleIds.length > 3 ? ", …" : ""}.`
-        : "";
-  const approval = decision.effect === "prompt" ? "Confirm only this action to continue. " : "";
+  const rule =
+    !confirmationBlocked &&
+    decision.effect === "deny" &&
+    decisive !== undefined &&
+    decision.evidence.ruleIds.includes(decisive.ruleId)
+      ? decisive
+      : undefined;
+  let explanation: string;
+  if (rule?.statement !== undefined) {
+    const context = rule.context ?? [];
+    const prohibition = context.some((heading) => /^(?:don't|don’t|do not|never)$/iu.test(heading));
+    let heading: string | undefined;
+    for (let index = context.length - 1; index >= 0; index -= 1) {
+      const entry = context[index];
+      if (entry !== undefined && !/^(?:do|don't|don’t|do not|never|examples?)$/iu.test(entry)) {
+        heading = entry;
+        break;
+      }
+    }
+    explanation = [
+      ...(heading === undefined ? [] : [`Rule: ${safeFeedbackText(heading, 100)}`]),
+      `${prohibition ? "Not allowed" : "Requirement"}: ${safeFeedbackText(rule.statement, 240)}`,
+    ].join("\n");
+  } else if (diagnostics?.path === "provider-unavailable") {
+    explanation = safeFeedbackText(decision.reason, 240);
+  } else if (confirmationBlocked) {
+    explanation =
+      resolution === "user-denied"
+        ? "You declined approval for this action."
+        : "The action could not be approved. No policy violation was established.";
+  } else if (diagnostics?.path === "semantic") {
+    explanation =
+      decision.effect === "deny"
+        ? "The policy assessment found a conflict."
+        : "The policy assessment needs your approval.";
+  } else {
+    explanation = safeFeedbackText(decision.reason, 240);
+  }
+  if (rule?.sourcePath !== undefined) {
+    const localPath = relative(action.workingDirectory, rule.sourcePath);
+    const source =
+      localPath === ".." || localPath.startsWith("../") || isAbsolute(localPath)
+        ? basename(rule.sourcePath)
+        : localPath;
+    explanation += `\nSource: ${safeFeedbackText(source, 140)}`;
+  }
+  const recovery =
+    decision.effect === "prompt"
+      ? "Approve this action to continue."
+      : confirmationBlocked
+        ? "Review approval settings if this should be allowed."
+        : diagnostics?.path === "incomplete-action"
+          ? "Provide complete tool arguments and retry."
+          : "Revise the action to follow the rule.";
   return brandPolicyText(
-    `${verb} ${identity}\n${safeFeedbackText(decision.reason, 480)}${provenance}\n${approval}Inspect /policy audit for details.`,
+    [
+      `${title}\n${summarizeAction(action)}${summarizeExecutionContext(action)}`,
+      explanation,
+      `${recovery}\nDetails: /policy audit`,
+    ].join("\n\n"),
   );
 }
 
@@ -190,6 +245,22 @@ function safeFeedbackText(value: string, limit: number): string {
     .replace(/\s+/gu, " ")
     .trim();
   return text.length > limit ? `${text.slice(0, limit - 1)}…` : text;
+}
+
+function summarizeExecutionContext(action: PolicyAction): string {
+  if (action.operation !== "execute") return "";
+  const cwd = typeof action.details.cwd === "string" ? action.details.cwd : action.workingDirectory;
+  const env = action.details.env;
+  const keys =
+    env !== null && typeof env === "object" && !Array.isArray(env) ? Object.keys(env) : [];
+  const overrides =
+    keys.length === 0
+      ? ""
+      : `; environment overrides: ${keys
+          .slice(0, 5)
+          .map((key) => safeFeedbackText(key, 32))
+          .join(", ")}${keys.length > 5 ? ", …" : ""} (values omitted)`;
+  return `\nWorking directory: ${safeFeedbackText(cwd, 180)}${overrides}`;
 }
 
 function summarizeAction(action: PolicyAction): string {

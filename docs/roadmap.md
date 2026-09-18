@@ -10,7 +10,7 @@ The marketplace plugin now includes:
 - profile-scoped SQLite migrations, projects, immutable snapshots, consent, stale transitions, and redacted audits with separate raw-provider, adapter, and final-enforcement diagnostics;
 - TypeSafe SDK integration, models-list validation, lossless whole-rule chunk coverage for oversized policies, conservative aggregation, thresholded decisions, `jev-latest` selection with per-chunk resolved-model diagnostics, and explicit unassessed provider fallback;
 - automatic onboarding plus `/policy status`, `/policy coverage`, `/policy onboard`, `/policy review`, `/policy audit [1–100]`, and `/policy consent`;
-- pre-effect gates for registered tools, direct shell, direct Python, and session-stop workflow checks, with grounded local path protections before remote-coverage filtering;
+- pre-effect gates for registered tools and direct shell/Python actions, plus headless session-stop workflow checks, with grounded local path protections before remote-coverage filtering;
 - outcome recording through `tool_result`, request-scoped current-turn context, digest-bound exact-action authorization, and policy-source stale/recompile behavior;
 - one-use scoped maintenance review/approval/revocation without hard-policy or availability bypass;
 - automated contract/integration tests, a credential-gated real-provider project end-to-end, and an opt-in live tuning runner that suppresses every proposed tool effect.
@@ -65,7 +65,7 @@ Acceptance: all applicable rules are covered before an aggregate allow; ambiguit
 - Leave host-owned utility slash commands outside policy evaluation so recovery operations such as `/login` cannot deadlock behind the evaluator they repair.
 - Capture request-scoped current-turn context in `before_agent_start`; reserve explicit exact-action authorization for digest-bound direct actions and validated one-use maintenance grants.
 - Gate `task` dispatch and preserve child-session lineage.
-- Check workflow obligations at session stop.
+- Check workflow obligations at session stop in headless sessions; keep interactive post-response hooks inert so the next draft retains every keystroke.
 
 Acceptance: enabled registered tools in the main session and unrestricted subagents are evaluated before execution; routine inspection skips remote evaluation by default while grounded local path protections remain active, explicit remote-coverage settings are honored, and restricted children are visibly labeled dispatch-only.
 
@@ -84,7 +84,7 @@ Acceptance: unsupported or bypassable surfaces cannot appear as enforced, and re
 
 Verification exercises both adapters and the actual boundaries:
 
-- automated runtime-harness scenarios cover registered tool decisions, tool outcomes, direct shell, direct Python, authorization redaction, audits, and the one-continuation workflow invariant;
+- automated runtime-harness scenarios cover registered tool decisions, tool outcomes, direct shell, direct Python, authorization redaction, audits, interactive session-stop bypass, and the one-continuation headless workflow invariant;
 - project-isolation tests cover nearest nested worktrees, `.git` files, symlink canonicalization, dependency exclusions, and subtree applicability;
 - persistence tests cover file modes, migration idempotence, transactional rollback, consent, stale state, snapshots, and redacted audits;
 - an actual OMP 18.1.19 TUI session loads the extension, shows an active snapshot through `/policy status`, intercepts a direct shell command, and returns the synthetic blocked result;

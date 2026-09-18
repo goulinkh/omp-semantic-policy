@@ -1,11 +1,16 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import * as fs from "node:fs/promises";
 import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { PolicyModel, PolicyModelRequest, PolicyModelResult } from "../../../policy/index.js";
 import { createPolicyRepository } from "../persistence/index.js";
-import { registerOmpPolicyRuntime } from "./registerOmpPolicyRuntime.js";
+import { createRedactedProviderState } from "../../typesafe/redactProviderState.js";
+import {
+  registerOmpPolicyRuntime,
+  type OmpPolicyRuntimeOptions,
+} from "./registerOmpPolicyRuntime.js";
 
 const temporaryDirectories: string[] = [];
 
@@ -16,6 +21,479 @@ afterEach(async () => {
 });
 
 describe("OMP policy runtime", () => {
+  test("coalesces duplicate registrations and concurrent deliveries without losing local denials", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "omp-policy-duplicate-runtime-"));
+    temporaryDirectories.push(fixture);
+    const projectRoot = join(fixture, "project");
+    const databasePath = join(fixture, "policy.db");
+    await mkdir(join(projectRoot, ".git"), { recursive: true });
+    await writeFile(
+      join(projectRoot, "AGENTS.md"),
+      "Never read or modify protected.txt. User requests do not override this prohibition.\n\nOrdinary local file writes outside protected.txt are allowed.\n",
+    );
+    const repository = await createPolicyRepository(databasePath);
+    repository.setRemoteConsent(true);
+    const requests: PolicyModelRequest[] = [];
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const options = {
+      databasePath,
+      profileInstructionPaths: [],
+      runtimeSettings: { showStatus: false },
+      createPolicyModel: (): PolicyModel => ({
+        ...fixturePolicyModel(requests),
+        async evaluate(request) {
+          requests.push(request);
+          started.resolve();
+          await release.promise;
+          return {
+            kind: "decision",
+            effect: requests.length === 1 ? "allow" : "deny",
+            confidence: 0.99,
+            hardViolationProbability: requests.length === 1 ? 0.01 : 0.99,
+            ruleIds: request.snapshot.rules.slice(0, 1).map((rule) => rule.id),
+            model: "fixture",
+            usage: { inputTokens: 1, outputTokens: 1 },
+          };
+        },
+      }),
+    };
+    const first = createExtensionHarness();
+    const second = createExtensionHarness();
+    registerOmpPolicyRuntime(first.api, options);
+    registerOmpPolicyRuntime(first.api, options);
+    // A distinct API mirrors independently loaded source/bundle extensions.
+    registerOmpPolicyRuntime(second.api, options);
+    const context = createContext(projectRoot);
+    const start = { type: "session_start" };
+    await first.emit("session_start", start, context);
+    await second.emit("session_start", start, context);
+    const event = {
+      type: "tool_call",
+      toolCallId: "shared-write",
+      toolName: "write",
+      input: { path: "ordinary.txt", content: "hello" },
+    };
+    const pending = first.emit("tool_call", event, context);
+    try {
+      await started.promise;
+      const duplicate = second.emit("tool_call", { ...event }, { ...context });
+      release.resolve();
+      expect(await pending).toBeUndefined();
+      expect(await duplicate).toBeUndefined();
+      expect(await first.emit("tool_call", { ...event }, context)).toBeUndefined();
+      expect(requests).toHaveLength(1);
+      expect(
+        await second.emit(
+          "tool_call",
+          {
+            ...event,
+            input: { ...event.input, content: "changed" },
+          },
+          context,
+        ),
+      ).toMatchObject({ block: true });
+
+      // Nested routed dispatches can legitimately reuse an ID under a new name.
+      const nested = { ...event, toolName: "read", input: { path: "ordinary.txt" } };
+      expect(await second.emit("tool_call", nested, context)).toBeUndefined();
+      const result = { ...event, type: "tool_result", content: [], isError: false };
+      await Promise.all([
+        first.emit("tool_result", result, context),
+        second.emit("tool_result", { ...result }, { ...context }),
+      ]);
+      await first.emit(
+        "tool_result",
+        { ...nested, type: "tool_result", content: [], isError: false },
+        context,
+      );
+      await second.emit("tool_call", event, context);
+      await second.emit("tool_result", result, context);
+      const protectedCall = {
+        type: "tool_call",
+        toolCallId: "protected",
+        toolName: "read",
+        input: { path: "protected.txt" },
+      };
+      expect(await first.emit("tool_call", protectedCall, context)).toMatchObject({ block: true });
+      expect(await second.emit("tool_call", { ...protectedCall }, context)).toMatchObject({
+        block: true,
+      });
+      const audits = repository.listAudits(await realpath(projectRoot));
+      expect(
+        audits.filter((audit) => audit.actionId === event.toolCallId && audit.phase === "decision"),
+      ).toHaveLength(2);
+      expect(
+        audits.filter(
+          (audit) => audit.actionId === event.toolCallId && audit.outcome === "success",
+        ),
+      ).toHaveLength(2);
+      expect(
+        audits.filter((audit) => audit.actionId === "protected" && audit.phase === "decision"),
+      ).toMatchObject([{ effect: "deny", diagnostics: { path: "local-denial" } }]);
+      expect(
+        audits.filter((audit) => audit.actionId === "protected" && audit.phase === "result"),
+      ).toMatchObject([{ outcome: "blocked" }]);
+
+      // Same ID cannot carry an old approval across an external policy edit.
+      await writeFile(join(projectRoot, "AGENTS.md"), "Never read or modify ordinary.txt.\n");
+      expect(await first.emit("tool_call", event, context)).toMatchObject({ block: true });
+      expect(
+        await first.emit("tool_call", { ...event, toolCallId: "after-policy-change" }, context),
+      ).toMatchObject({ block: true });
+    } finally {
+      release.resolve();
+      await pending;
+      await first.emit("session_shutdown", { type: "session_shutdown" }, context);
+      await second.emit("session_shutdown", { type: "session_shutdown" }, context);
+      repository.close();
+    }
+  });
+
+  test("assesses original source per dispatch, coalesces duplicates, and keeps source out of audits", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "omp-policy-source-context-"));
+    temporaryDirectories.push(fixture);
+    const projectRoot = join(fixture, "project");
+    const databasePath = join(fixture, "policy.db");
+    await mkdir(join(projectRoot, ".git"), { recursive: true });
+    await writeFile(
+      join(projectRoot, "AGENTS.md"),
+      "Never modify a record whose original lifecycle is frozen.\n",
+    );
+    const target = join(await realpath(projectRoot), "record.ts");
+    const editableSource = "lifecycle=editable\nrecord=old\n";
+    const frozenSource = "lifecycle=frozen\nrecord=old\n";
+    await writeFile(target, editableSource);
+    const repository = await createPolicyRepository(databasePath);
+    repository.setRemoteConsent(true);
+    const requests: PolicyModelRequest[] = [];
+    const started = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<void>();
+    const options = {
+      databasePath,
+      profileInstructionPaths: [],
+      runtimeSettings: { showStatus: false },
+      createPolicyModel: (): PolicyModel => ({
+        ...fixturePolicyModel(requests),
+        async evaluate(request) {
+          requests.push(request);
+          started.resolve();
+          await release.promise;
+          const source = request.action.details.sourceContext as
+            | {
+                readonly phase: string;
+                readonly files: readonly {
+                  readonly status: string;
+                  readonly ranges?: readonly { readonly text: string }[];
+                }[];
+              }
+            | undefined;
+          if (
+            source?.phase !== "before" ||
+            source.files.length !== 1 ||
+            source.files[0]?.status !== "included"
+          ) {
+            return { kind: "unavailable", reason: "Original lifecycle cannot be assessed." };
+          }
+          const original = source.files[0].ranges?.map((range) => range.text).join("\n") ?? "";
+          const frozen = original.includes("lifecycle=frozen");
+          return {
+            kind: "decision",
+            effect: frozen ? "deny" : "allow",
+            confidence: 0.99,
+            hardViolationProbability: frozen ? 0.99 : 0.01,
+            ruleIds: frozen ? request.snapshot.rules.slice(0, 1).map((rule) => rule.id) : [],
+            model: this.modelVersion,
+            usage: { inputTokens: 1, outputTokens: 1 },
+          };
+        },
+      }),
+    };
+    const first = createExtensionHarness();
+    const second = createExtensionHarness();
+    registerOmpPolicyRuntime(first.api, options);
+    registerOmpPolicyRuntime(second.api, options);
+    const confirmations: string[] = [];
+    const context = createContext(projectRoot, [], { confirmations });
+    const start = { type: "session_start" };
+    await first.emit("session_start", start, context);
+    await second.emit("session_start", start, context);
+    const openFile = fs.open;
+    let sourceReads = 0;
+    const sourceAccess = spyOn(fs, "open").mockImplementation(async (path, ...args) => {
+      if (String(path) === target) sourceReads += 1;
+      return openFile(path, ...args);
+    });
+    const event = {
+      type: "tool_call",
+      toolCallId: "editable-record",
+      toolName: "edit",
+      input: { path: "record.ts", old_string: "record=old", new_string: "record=new" },
+    };
+    const pending = first.emit("tool_call", event, context);
+    try {
+      await started.promise;
+      await writeFile(target, frozenSource);
+      const duplicate = second.emit("tool_call", { ...event }, { ...context });
+      release.resolve();
+      expect(await pending).toBeUndefined();
+      expect(await duplicate).toBeUndefined();
+      expect(await first.emit("tool_call", event, context)).toBeUndefined();
+      expect(sourceReads).toBe(1);
+      expect(requests).toHaveLength(1);
+      await first.emit(
+        "tool_result",
+        { ...event, type: "tool_result", content: [], isError: false },
+        context,
+      );
+
+      const denied = await first.emit(
+        "tool_call",
+        { ...event, toolCallId: "frozen-record" },
+        context,
+      );
+      expect(denied).toMatchObject({ block: true });
+      expect(sourceReads).toBe(2);
+      expect(requests).toHaveLength(2);
+      expect(JSON.stringify(denied)).not.toContain("lifecycle=frozen");
+
+      await rm(target);
+      expect(
+        await first.emit("tool_call", { ...event, toolCallId: "missing-record" }, context),
+      ).toBeUndefined();
+      expect(confirmations).toEqual([]);
+      const audits = repository.listAudits(await realpath(projectRoot));
+      expect(
+        audits.find((audit) => audit.actionId === "missing-record" && audit.phase === "decision"),
+      ).toMatchObject({
+        effect: "allow",
+        diagnostics: { confirmation: { resolution: "automatic-approve" } },
+      });
+      expect(audits.filter((audit) => audit.phase === "decision")).toHaveLength(3);
+      const serialized = JSON.stringify(audits);
+      expect(serialized).not.toContain("sourceContext");
+      expect(serialized).not.toContain("mutationContext");
+      expect(serialized).not.toContain("record=new");
+      expect(serialized).not.toContain("lifecycle=editable");
+      expect(serialized).not.toContain("lifecycle=frozen");
+    } finally {
+      release.resolve();
+      await pending;
+      sourceAccess.mockRestore();
+      await first.emit("session_shutdown", {}, context);
+      await second.emit("session_shutdown", {}, context);
+      repository.close();
+    }
+  });
+
+  test.each(["local-denial", "coverage-bypass", "no-consent", "no-credentials"] as const)(
+    "does not read mutation source or evaluate remotely after %s",
+    async (gate) => {
+      const fixture = await mkdtemp(join(tmpdir(), "omp-policy-source-gates-"));
+      temporaryDirectories.push(fixture);
+      const projectRoot = join(fixture, "project");
+      const databasePath = join(fixture, "policy.db");
+      await mkdir(join(projectRoot, ".git"), { recursive: true });
+      await writeFile(
+        join(projectRoot, "AGENTS.md"),
+        gate === "local-denial"
+          ? "Never read or modify protected.ts.\n"
+          : "Never modify a record whose original lifecycle is frozen.\n",
+      );
+      const target = join(await realpath(projectRoot), "protected.ts");
+      await writeFile(target, "lifecycle=frozen\nrecord=old\n");
+      const repository = await createPolicyRepository(databasePath);
+      repository.setRemoteConsent(gate !== "no-consent");
+      const requests: PolicyModelRequest[] = [];
+      const harness = createExtensionHarness();
+      registerOmpPolicyRuntime(harness.api, {
+        databasePath,
+        profileInstructionPaths: [],
+        createPolicyModel: () => fixturePolicyModel(requests),
+        runtimeSettings: {
+          showStatus: false,
+          disabledToolCalls: gate === "coverage-bypass" ? ["edit"] : [],
+        },
+      });
+      const context = createContext(projectRoot, [], {
+        providerApiKey: gate === "no-credentials" ? null : "fixture-api-key",
+      });
+      await harness.emit("session_start", {}, context);
+      const openFile = fs.open;
+      let sourceReads = 0;
+      const sourceAccess = spyOn(fs, "open").mockImplementation(async (path, ...args) => {
+        if (String(path) === target) sourceReads += 1;
+        return openFile(path, ...args);
+      });
+      try {
+        const result = await harness.emit(
+          "tool_call",
+          {
+            type: "tool_call",
+            toolCallId: gate,
+            toolName: "edit",
+            input: { path: "protected.ts", old_string: "record=old", new_string: "record=new" },
+          },
+          context,
+        );
+        if (gate === "local-denial") {
+          expect(result).toMatchObject({ block: true });
+        } else {
+          expect(result).toBeUndefined();
+        }
+        expect(sourceReads).toBe(0);
+        expect(requests).toEqual([]);
+      } finally {
+        sourceAccess.mockRestore();
+        await harness.emit("session_shutdown", {}, context);
+        repository.close();
+      }
+    },
+  );
+
+  test.each(["before-read", "before-egress"] as const)(
+    "honors consent revoked %s without changing automatic approval",
+    async (phase) => {
+      const fixture = await mkdtemp(join(tmpdir(), "omp-policy-source-consent-"));
+      temporaryDirectories.push(fixture);
+      const projectRoot = join(fixture, "project");
+      const databasePath = join(fixture, "policy.db");
+      await mkdir(join(projectRoot, ".git"), { recursive: true });
+      await writeFile(
+        join(projectRoot, "AGENTS.md"),
+        "Never modify a record whose original lifecycle is frozen.\n",
+      );
+      const target = join(await realpath(projectRoot), "record.ts");
+      await writeFile(target, "lifecycle=frozen\nrecord=old\n");
+      const repository = await createPolicyRepository(databasePath);
+      repository.setRemoteConsent(true);
+      const requests: PolicyModelRequest[] = [];
+      const harness = createExtensionHarness();
+      registerOmpPolicyRuntime(harness.api, {
+        databasePath,
+        profileInstructionPaths: [],
+        createPolicyModel: () => {
+          if (phase === "before-read") repository.setRemoteConsent(false);
+          return fixturePolicyModel(requests);
+        },
+        runtimeSettings: { showStatus: false },
+      });
+      const context = createContext(projectRoot);
+      await harness.emit("session_start", {}, context);
+      const openFile = fs.open;
+      let sourceReads = 0;
+      const sourceAccess = spyOn(fs, "open").mockImplementation(async (path, ...args) => {
+        const file = await openFile(path, ...args);
+        if (String(path) === target) {
+          sourceReads += 1;
+          if (phase === "before-egress") repository.setRemoteConsent(false);
+        }
+        return file;
+      });
+      try {
+        expect(
+          await harness.emit(
+            "tool_call",
+            {
+              type: "tool_call",
+              toolCallId: "revoked-edit",
+              toolName: "edit",
+              input: { path: "record.ts", old_string: "record=old", new_string: "record=new" },
+            },
+            context,
+          ),
+        ).toBeUndefined();
+        expect(sourceReads).toBe(phase === "before-read" ? 0 : 1);
+        expect(requests).toEqual([]);
+        expect(
+          repository
+            .listAudits(await realpath(projectRoot))
+            .find((audit) => audit.phase === "decision"),
+        ).toMatchObject({
+          effect: "allow",
+          diagnostics: {
+            semantic: { unavailableReason: "not-consented" },
+            confirmation: { resolution: "automatic-approve" },
+          },
+        });
+      } finally {
+        sourceAccess.mockRestore();
+        await harness.emit("session_shutdown", {}, context);
+        repository.close();
+      }
+    },
+  );
+
+  test("isolates shared action IDs across hosts, session switches, configuration and teardown", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "omp-policy-session-isolation-"));
+    temporaryDirectories.push(fixture);
+    const projectRoot = join(fixture, "project");
+    const databasePath = join(fixture, "policy.db");
+    await mkdir(join(projectRoot, ".git"), { recursive: true });
+    await writeFile(join(projectRoot, "AGENTS.md"), "Ask before editing files.\n");
+    const repository = await createPolicyRepository(databasePath);
+    repository.setRemoteConsent(true);
+    const options = {
+      databasePath,
+      profileInstructionPaths: [],
+      createPolicyModel: promptPolicyModel,
+      runtimeSettings: { showStatus: false, confirmationThreshold: 0.5 },
+    };
+    const first = createExtensionHarness();
+    const second = createExtensionHarness();
+    registerOmpPolicyRuntime(first.api, options);
+    registerOmpPolicyRuntime(second.api, options);
+    let sessionId = "first";
+    const confirmations: string[] = [];
+    const firstContext = createContext(projectRoot, [], {
+      confirmations,
+      sessionId: () => sessionId,
+    });
+    const secondContext = createContext(projectRoot, [], {
+      approved: false,
+      sessionId: () => sessionId,
+    });
+    const event = {
+      type: "tool_call",
+      toolCallId: "same-id",
+      toolName: "write",
+      input: { path: "ordinary.txt", content: "hello" },
+    };
+    await first.emit("session_start", {}, firstContext);
+    await second.emit("session_start", {}, secondContext);
+    try {
+      expect(await first.emit("tool_call", event, firstContext)).toBeUndefined();
+      expect(await first.emit("tool_call", { ...event }, firstContext)).toBeUndefined();
+      expect(confirmations).toHaveLength(1);
+      expect(await second.emit("tool_call", event, secondContext)).toMatchObject({ block: true });
+      sessionId = "second";
+      await first.emit("session_switch", {}, firstContext);
+      expect(await first.emit("tool_call", event, firstContext)).toBeUndefined();
+      expect(confirmations).toHaveLength(2);
+
+      const configured = createExtensionHarness();
+      registerOmpPolicyRuntime(configured.api, {
+        ...options,
+        runtimeSettings: { showStatus: false, confirmationDefault: "deny" },
+      });
+      await configured.emit("session_start", {}, firstContext);
+      expect(await configured.emit("tool_call", event, firstContext)).toMatchObject({
+        block: true,
+      });
+      await configured.emit("session_shutdown", {}, firstContext);
+    } finally {
+      await first.emit("session_shutdown", {}, firstContext);
+      await second.emit("session_shutdown", {}, secondContext);
+    }
+    const restarted = createExtensionHarness();
+    registerOmpPolicyRuntime(restarted.api, options);
+    await restarted.emit("session_start", {}, firstContext);
+    expect(await restarted.emit("tool_call", event, firstContext)).toBeUndefined();
+    expect(confirmations).toHaveLength(3);
+    await restarted.emit("session_shutdown", {}, firstContext);
+    repository.close();
+  });
+
   test("gates tool, direct command, and workflow surfaces and records audits", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "omp-policy-runtime-"));
     temporaryDirectories.push(fixture);
@@ -58,6 +536,7 @@ describe("OMP policy runtime", () => {
     );
     expect(toolCallResult).toBeUndefined();
     expect(modelRequests.at(-1)?.authorization?.summary).not.toContain("super-secret-value");
+    expect(modelRequests.at(-1)?.authorization?.requestContext).toBeUndefined();
 
     await harness.emit(
       "tool_result",
@@ -79,6 +558,12 @@ describe("OMP policy runtime", () => {
       context,
     );
     expect(bashResult?.result?.exitCode).toBe(126);
+    const shellRequest = modelRequests.at(-1)!;
+    const shellEvidence = createRedactedProviderState(shellRequest);
+    expect(shellEvidence.authorization.requestContext?.messages.at(-1)?.text).toContain(
+      "Deploy with TOKEN=",
+    );
+    expect(JSON.stringify(shellEvidence.authorization)).not.toContain("super-secret-value");
 
     const pythonResult = await harness.emit<{ readonly result?: { readonly exitCode?: number } }>(
       "user_python",
@@ -100,19 +585,23 @@ describe("OMP policy runtime", () => {
       stop_hook_active: false,
       signal: new AbortController().signal,
     };
+    const requestsBeforeInteractiveStop = modelRequests.length;
+    expect(await harness.emit("session_stop", stopEvent, context)).toBeUndefined();
+    expect(modelRequests).toHaveLength(requestsBeforeInteractiveStop);
+    const headlessContext = { ...context, hasUI: false };
     expect(
       await harness.emit<{ readonly decision: "block"; readonly reason: string }>(
         "session_stop",
         stopEvent,
-        context,
+        headlessContext,
       ),
     ).toMatchObject({ decision: "block" });
     const requestsAfterContinuation = modelRequests.length;
-    expect(await harness.emit("session_stop", stopEvent, context)).toBeUndefined();
+    expect(await harness.emit("session_stop", stopEvent, headlessContext)).toBeUndefined();
     expect(modelRequests).toHaveLength(requestsAfterContinuation);
-    await harness.emit("session_switch", { type: "session_switch" }, context);
+    await harness.emit("session_switch", { type: "session_switch" }, headlessContext);
     expect(
-      await harness.emit<{ readonly decision: string }>("session_stop", stopEvent, context),
+      await harness.emit<{ readonly decision: string }>("session_stop", stopEvent, headlessContext),
     ).toMatchObject({ decision: "block" });
     expect(modelRequests).toHaveLength(requestsAfterContinuation + 1);
 
@@ -502,6 +991,7 @@ describe("OMP policy runtime", () => {
             effect: "deny",
             confidence: 0.9,
             hardViolationProbability: 0.9,
+            ruleIds: request.snapshot.rules.slice(0, 1).map((rule) => rule.id),
             model: "fixture",
             usage: { inputTokens: 1, outputTokens: 1 },
           };
@@ -548,11 +1038,9 @@ describe("OMP policy runtime", () => {
       expect(sized?.block).toBe(true);
       expect(sized?.reason).toContain("bash");
       expect(sized?.reason).toContain("wc -c dist/index.js");
-      expect(sized?.reason).toContain("size-check");
-      expect(sized?.reason).not.toContain("eval-check");
       expect(evaluated?.block).toBe(true);
-      expect(evaluated?.reason).toContain("eval-check");
-      expect(evaluated?.reason).not.toContain("size-check");
+      expect(evaluated?.reason).toContain("eval");
+      expect(evaluated?.reason).not.toContain("wc -c dist/index.js");
       expect(evaluated?.reason).not.toContain("private-code-body");
       expect(notifications).toEqual([]);
     } finally {
@@ -903,7 +1391,7 @@ describe("OMP policy runtime", () => {
     repository.close();
   });
 
-  test("binds maintenance approval to one exact retry and invalidates it on policy change", async () => {
+  test("shares one-use maintenance approval across registrations and invalidates it on policy change", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "omp-policy-maintenance-runtime-"));
     temporaryDirectories.push(fixture);
     const projectRoot = join(fixture, "project");
@@ -912,17 +1400,18 @@ describe("OMP policy runtime", () => {
     await writeFile(join(projectRoot, "AGENTS.md"), "Ask before installing dependencies.\n");
     const harness = createExtensionHarness();
     let hardDeny = false;
-    registerOmpPolicyRuntime(harness.api, {
+    const options: OmpPolicyRuntimeOptions = {
       databasePath,
       profileInstructionPaths: [],
       createPolicyModel: () => ({
         ...promptPolicyModel(),
-        async evaluate() {
+        async evaluate(request) {
           return {
             kind: "decision",
             effect: hardDeny ? "deny" : "prompt",
             confidence: 0.9,
             hardViolationProbability: hardDeny ? 0.95 : 0.1,
+            ruleIds: hardDeny ? request.snapshot.rules.slice(0, 1).map((rule) => rule.id) : [],
             model: "fixture",
             usage: { inputTokens: 1, outputTokens: 1 },
           };
@@ -934,7 +1423,11 @@ describe("OMP policy runtime", () => {
         confirmationDefault: "deny",
         confirmationThreshold: 1,
       },
-    });
+    };
+    // The first handler owns the blocked proposal; the last command registration
+    // receives /policy maintenance approve and must find that same candidate.
+    registerOmpPolicyRuntime(harness.api, options);
+    registerOmpPolicyRuntime(harness.api, options);
     const context = createContext(projectRoot);
     const propose = (id: string, command = "bun install --frozen-lockfile") =>
       harness.emit(
@@ -950,6 +1443,9 @@ describe("OMP policy runtime", () => {
         { block: true },
       );
       expect(await propose("approved-retry")).toBeUndefined();
+      expect(await propose("approved-retry")).toBeUndefined();
+      await harness.runCommand("policy", "maintenance revoke", context);
+      expect(await propose("approved-retry")).toMatchObject({ block: true });
       expect(await propose("used-up")).toMatchObject({ block: true });
       await harness.runCommand("policy", "maintenance approve used-up", context);
       hardDeny = true;
@@ -997,7 +1493,7 @@ interface ExtensionHarness {
 }
 
 function createExtensionHarness(): ExtensionHarness {
-  const handlers = new Map<string, RuntimeHandler>();
+  const handlers = new Map<string, RuntimeHandler[]>();
   const commands = new Map<string, RuntimeCommandHandler>();
   const api = {
     registerProvider() {},
@@ -1017,7 +1513,9 @@ function createExtensionHarness(): ExtensionHarness {
     },
     on(event: string, handler: unknown) {
       if (typeof handler === "function") {
-        handlers.set(event, handler as RuntimeHandler);
+        const registered = handlers.get(event) ?? [];
+        registered.push(handler as RuntimeHandler);
+        handlers.set(event, registered);
       }
     },
   } as unknown as ExtensionAPI;
@@ -1025,11 +1523,20 @@ function createExtensionHarness(): ExtensionHarness {
   return {
     api,
     async emit<Result>(event: string, payload: unknown, context: ExtensionContext) {
-      const handler = handlers.get(event);
-      if (handler === undefined) {
-        return undefined;
+      let result: unknown;
+      for (const handler of handlers.get(event) ?? []) {
+        const current = await handler(payload, context);
+        if (current !== undefined) result = current;
+        if (
+          event === "tool_call" &&
+          typeof current === "object" &&
+          current !== null &&
+          "block" in current &&
+          current.block
+        )
+          break;
       }
-      return (await handler(payload, context)) as Result;
+      return result as Result | undefined;
     },
     async runCommand(name, args, context) {
       const handler = commands.get(name);
@@ -1042,6 +1549,7 @@ function createExtensionHarness(): ExtensionHarness {
 }
 
 interface ContextObservations {
+  readonly sessionId?: () => string;
   readonly notifications?: string[];
   readonly statuses?: Array<string | undefined>;
   readonly confirmations?: string[];
@@ -1110,7 +1618,7 @@ function createContext(
     },
     sessionManager: {
       getSessionId() {
-        return "session-1";
+        return observations.sessionId?.() ?? "session-1";
       },
     },
     modelRegistry: {
@@ -1138,6 +1646,7 @@ function fixturePolicyModel(requests: PolicyModelRequest[]): PolicyModel {
         effect: allow ? "allow" : "deny",
         confidence: 0.99,
         hardViolationProbability: allow ? 0.01 : 0.95,
+        ruleIds: allow ? [] : request.snapshot.rules.slice(0, 1).map((rule) => rule.id),
         model: "model-v1",
         usage: { inputTokens: 1, outputTokens: 1 },
       };

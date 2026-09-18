@@ -3,18 +3,20 @@ import {
   logger,
   type ExtensionAPI,
   type ExtensionContext,
+  type ToolCallEventResult,
   type ToolInfo,
 } from "@oh-my-pi/pi-coding-agent";
 import { Loader } from "@oh-my-pi/pi-tui";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import type {
   AuthorizationEnvelope,
   PolicyAction,
   PolicyAuditRecord,
   PolicyDecision,
   PolicyModel,
+  PolicyModelResult,
   PolicySnapshot,
 } from "../../../policy/index.js";
 import { actionMayMutatePolicySources } from "../../../policy/index.js";
@@ -32,6 +34,8 @@ import {
   parsePolicyCommandArguments,
 } from "../commands/policyCommand.js";
 import { formatCoverageReport } from "../coverage/formatCoverageReport.js";
+import { addMutationSourceContext } from "../events/addMutationSourceContext.js";
+import { collectShellRequestContext } from "../events/collectShellRequestContext.js";
 import { applyOmpToolDecision } from "../events/applyToolDecision.js";
 import { normalizeOmpToolCall } from "../events/normalizeToolCall.js";
 import {
@@ -47,6 +51,7 @@ import { bindRequestAuthorization } from "../enforcement/bindRequestAuthorizatio
 import {
   createMaintenanceApprovals,
   digestPolicyAction,
+  type MaintenanceApprovals,
 } from "../enforcement/maintenanceApprovals.js";
 import { POLICY_LOGO, POLICY_NAME, brandPolicyText } from "../policyIdentity.js";
 import { createDefaultModelStandardsCompletion } from "./createDefaultModelStandardsCompletion.js";
@@ -64,10 +69,50 @@ const MANUAL_ONBOARDING_START_DELAY_MS = 25;
 const ONBOARDING_WIDGET_KEY = "omp-semantic-policy-onboarding";
 const ONBOARDING_PROGRESS_MESSAGE = "Discovering policy sources and compiling snapshot…";
 
-interface PendingAction {
-  readonly action: PolicyAction;
-  readonly snapshot?: PolicySnapshot;
+interface CoordinatedAction {
+  readonly inputDigest: string;
+  readonly policyDigest: string;
+  readonly result: Promise<ToolCallEventResult | undefined>;
+  settled: boolean;
+  outcome?: (isError: boolean) => Promise<void>;
 }
+interface SessionCoordinator {
+  readonly actions: Map<string, CoordinatedAction>;
+  readonly participants: Set<object>;
+  readonly lifecycleEvents: WeakSet<object>;
+  readonly maintenance: MaintenanceApprovals;
+  maintenanceRevision: number;
+}
+interface RuntimeCoordinators {
+  readonly hosts: WeakMap<object, Map<string, SessionCoordinator>>;
+  readonly functionIds: WeakMap<object, number>;
+  nextFunctionId: number;
+}
+
+// Source and bundled extensions have distinct module state and ExtensionAPI
+// instances. OMP passes the same SessionManager to every extension in a runner.
+// The protocol version prevents incompatible bundles from sharing decisions.
+const COORDINATOR_KEY = Symbol.for("omp-semantic-policy.runtime-coordinators.v2");
+const MAX_COORDINATED_ACTIONS = 512;
+const sharedGlobals = globalThis as typeof globalThis & {
+  [COORDINATOR_KEY]?: RuntimeCoordinators;
+};
+const runtimeCoordinators = (sharedGlobals[COORDINATOR_KEY] ??= {
+  hosts: new WeakMap(),
+  functionIds: new WeakMap(),
+  nextFunctionId: 0,
+});
+
+function functionIdentity(value: object | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  let id = runtimeCoordinators.functionIds.get(value);
+  if (id === undefined) {
+    id = ++runtimeCoordinators.nextFunctionId;
+    runtimeCoordinators.functionIds.set(value, id);
+  }
+  return id;
+}
+
 type SemanticEvaluatorState =
   | "available"
   | "unavailable"
@@ -93,15 +138,67 @@ export function registerOmpPolicyRuntime(
   options: OmpPolicyRuntimeOptions = {},
 ): void {
   registerTypeSafeProvider(pi);
-  const repositoryPromise = createPolicyRepository(
-    options.databasePath ?? join(getAgentDir(), "policy.db"),
-  );
+  const databasePath = resolve(options.databasePath ?? join(getAgentDir(), "policy.db"));
+  const repositoryPromise = createPolicyRepository(databasePath);
   const toolInfoByName = new Map<string, ToolInfo>();
-  const pendingActions = new Map<string, PendingAction>();
-  const maintenance = createMaintenanceApprovals();
+  const participant = {};
+  const configurationKey = JSON.stringify({
+    databasePath,
+    profileInstructionPaths: (
+      options.profileInstructionPaths ?? defaultProfileInstructionPaths()
+    ).map((path) => resolve(path)),
+    createPolicyModel: functionIdentity(options.createPolicyModel),
+    standardsCompletion: functionIdentity(options.standardsCompletion),
+    runtimeSettings: options.runtimeSettings,
+    question: TYPESAFE_QUESTION_VERSION,
+    thresholds: TYPESAFE_THRESHOLD_VERSION,
+    model: DEFAULT_TYPESAFE_POLICY_MODEL,
+  });
+  let attached:
+    | {
+        readonly sessions: Map<string, SessionCoordinator>;
+        readonly key: string;
+        readonly coordinator: SessionCoordinator;
+      }
+    | undefined;
+
+  function detach(): void {
+    if (attached === undefined) return;
+    attached.coordinator.participants.delete(participant);
+    if (attached.coordinator.participants.size === 0) {
+      attached.sessions.delete(attached.key);
+    }
+    attached = undefined;
+  }
+
+  function coordinatorFor(context: ExtensionContext): SessionCoordinator {
+    let sessions = runtimeCoordinators.hosts.get(context.sessionManager);
+    if (sessions === undefined) {
+      sessions = new Map();
+      runtimeCoordinators.hosts.set(context.sessionManager, sessions);
+    }
+    const key = JSON.stringify([context.sessionManager.getSessionId(), configurationKey]);
+    if (attached?.sessions === sessions && attached.key === key) return attached.coordinator;
+    detach();
+    let coordinator = sessions.get(key);
+    if (coordinator === undefined) {
+      coordinator = {
+        actions: new Map(),
+        participants: new Set(),
+        lifecycleEvents: new WeakSet(),
+        maintenance: createMaintenanceApprovals(),
+        maintenanceRevision: 0,
+      };
+      sessions.set(key, coordinator);
+    }
+    coordinator.participants.add(participant);
+    attached = { sessions, key, coordinator };
+    return coordinator;
+  }
   let activeProjectRoot: string | undefined;
   let authorization: AuthorizationEnvelope | undefined;
   let originalRequest: string | undefined;
+  let requestContext: AuthorizationEnvelope["requestContext"];
   let consentPromptActive = false;
   let lastContinuationTurn: number | undefined;
   let cachedModel: { readonly apiKey: string; readonly model: PolicyModel } | undefined;
@@ -162,7 +259,7 @@ export function registerOmpPolicyRuntime(
       try {
         const consented = await context.ui.confirm(
           POLICY_NAME,
-          "Allow redacted policy rules, selected action details, and current-turn requests to be evaluated by TypeSafe AI? Credentials are redacted before transmission.",
+          "Allow redacted policy rules, selected action details (including proposed file content, patches, and bounded before/after evidence), current-turn requests, and bounded recent shell confirmation context to be evaluated by TypeSafe AI? Recognized credentials are redacted before transmission.",
         );
         repository.setRemoteConsent(consented);
       } finally {
@@ -188,11 +285,13 @@ export function registerOmpPolicyRuntime(
   async function ensureSnapshot(
     context: ExtensionContext,
     operation: PolicyAction["operation"],
+    refresh = false,
   ): Promise<{ readonly repository: PolicyRepository; readonly snapshot?: PolicySnapshot }> {
     const repository = await repositoryPromise;
     const highImpact = operation !== "read" && operation !== "workflow" && operation !== "internal";
     if (
       activeProjectRoot === undefined ||
+      refresh ||
       highImpact ||
       repository.getProject(activeProjectRoot)?.stale
     ) {
@@ -208,7 +307,8 @@ export function registerOmpPolicyRuntime(
     repository: PolicyRepository,
     signal?: AbortSignal,
   ): Promise<PolicyModel | undefined> {
-    if (repository.getRemoteConsent() !== true) {
+    const hasConsent = () => repository.getRemoteConsent() === true;
+    if (!hasConsent()) {
       semanticEvaluatorState = "disabled";
       semanticEvaluatorIssue = "consent-disabled";
       return undefined;
@@ -228,11 +328,11 @@ export function registerOmpPolicyRuntime(
       if (cachedModel?.apiKey === apiKey) {
         return cachedModel.model;
       }
-      const model =
-        options.createPolicyModel?.(apiKey, () => repository.getRemoteConsent() === true) ??
+      const delegate =
+        options.createPolicyModel?.(apiKey, hasConsent) ??
         createTypeSafePolicyModel({
           apiKey,
-          hasConsent: () => repository.getRemoteConsent() === true,
+          hasConsent,
           onError: (error) => {
             logger.warn("TypeSafe policy evaluation failed", {
               error: redactText(
@@ -241,6 +341,31 @@ export function registerOmpPolicyRuntime(
             });
           },
         });
+      const notConsented: PolicyModelResult = {
+        kind: "unavailable",
+        reason: "Remote semantic evaluation has not been consented to.",
+        diagnostics: {
+          status: "unavailable",
+          providerId: delegate.providerId,
+          requestedModel: delegate.modelVersion,
+          unavailableReason: "not-consented",
+        },
+      };
+      const model: PolicyModel = {
+        providerId: delegate.providerId,
+        modelVersion: delegate.modelVersion,
+        validate(signal) {
+          return delegate.validate(signal);
+        },
+        async evaluate(request, signal) {
+          signal?.throwIfAborted();
+          if (!hasConsent()) return notConsented;
+          const action = await addMutationSourceContext(request.action, request.snapshot, signal);
+          signal?.throwIfAborted();
+          if (!hasConsent()) return notConsented;
+          return delegate.evaluate({ ...request, action }, signal);
+        },
+      };
       cachedModel = { apiKey, model };
       return model;
     } catch {
@@ -257,12 +382,14 @@ export function registerOmpPolicyRuntime(
     explicitAuthorization = authorization,
     semanticEnabled = true,
     confirmationThreshold = runtimeSettings.confirmationThreshold,
+    prepared?: { readonly repository: PolicyRepository; readonly snapshot?: PolicySnapshot },
   ): Promise<{ readonly decision: PolicyDecision; readonly snapshot?: PolicySnapshot }> {
-    const { repository, snapshot } = await ensureSnapshot(context, action.operation);
+    const { repository, snapshot } = prepared ?? (await ensureSnapshot(context, action.operation));
     const maintenanceApproved =
-      snapshot !== undefined && (await maintenance.consume(action, snapshot));
+      snapshot !== undefined &&
+      (await coordinatorFor(context).maintenance.consume(action, snapshot));
     const boundAuthorization = maintenanceApproved
-      ? currentTurnAuthorization(action)
+      ? currentTurnAuthorization(action, explicitAuthorization?.requestContext)
       : bindRequestAuthorization(action, explicitAuthorization, originalRequest);
     let modelRequested = false;
     let model: PolicyModel | undefined;
@@ -335,7 +462,7 @@ export function registerOmpPolicyRuntime(
       decision.evidence.diagnostics?.path === "semantic" &&
       decision.evidence.diagnostics.semantic?.adapterEffect === "prompt"
     ) {
-      await maintenance.remember(action, snapshot);
+      await coordinatorFor(context).maintenance.remember(action, snapshot);
     }
   }
 
@@ -411,10 +538,9 @@ export function registerOmpPolicyRuntime(
     activeProjectRoot = undefined;
     authorization = undefined;
     originalRequest = undefined;
+    requestContext = undefined;
     semanticEvaluatorState = undefined;
     semanticEvaluatorIssue = undefined;
-    pendingActions.clear();
-    maintenance.clear();
     runtimeSettings = await loadPolicyRuntimeSettings(context.cwd, options.runtimeSettings);
     disabledToolCallNames = new Set(runtimeSettings.disabledToolCalls);
     enabledToolCallNames = new Set(runtimeSettings.enabledToolCalls);
@@ -432,11 +558,22 @@ export function registerOmpPolicyRuntime(
     }
   }
 
-  pi.on("session_start", async (_event, context) => initialize(context));
-  pi.on("session_switch", async (_event, context) => initialize(context));
+  async function initializeSession(event: object, context: ExtensionContext): Promise<void> {
+    const coordinator = coordinatorFor(context);
+    if (!coordinator.lifecycleEvents.has(event)) {
+      coordinator.lifecycleEvents.add(event);
+      coordinator.actions.clear();
+      coordinator.maintenance.clear();
+      coordinator.maintenanceRevision = 0;
+    }
+    await initialize(context);
+  }
+  pi.on("session_start", initializeSession);
+  pi.on("session_switch", initializeSession);
 
   pi.on("before_agent_start", async (event, context) => {
     originalRequest = event.prompt;
+    requestContext = collectShellRequestContext(context.sessionManager, event.prompt);
     authorization = {
       source: "current-turn",
       explicit: false,
@@ -460,44 +597,105 @@ export function registerOmpPolicyRuntime(
     const action = normalizeOmpToolCall(event, context, {
       toolInfo: findToolInfo(pi, toolInfoByName, event.toolName),
     });
-    const { decision, snapshot } = await evaluateAction(
-      action,
-      context,
-      undefined,
-      authorization,
-      semanticEnabled,
-    );
-    pendingActions.set(action.id, { action, ...(snapshot === undefined ? {} : { snapshot }) });
-    const result = await applyOmpToolDecision(decision, context, action);
-    await recordDecision(action, decision, snapshot, context, result?.block === true);
-    if (result?.block === true) {
-      await recordOutcome(action, snapshot, context, "blocked");
-      pendingActions.delete(action.id);
+    const actionAuthorization =
+      event.toolName === "bash" && authorization !== undefined && requestContext !== undefined
+        ? { ...authorization, requestContext }
+        : authorization;
+    const coordinator = coordinatorFor(context);
+    // Refresh before reusing an approval, including otherwise-excluded reads:
+    // policy files may have changed outside a tool_result observed by this copy.
+    const prepared = await ensureSnapshot(context, action.operation, true);
+    // OMP's nested xd:// dispatch reuses the outer call ID with a new tool name.
+    const dispatchId = JSON.stringify([action.id, event.toolName]);
+    const inputDigest = digestPolicyAction(action);
+    const policyDigest = createHash("sha256")
+      .update(
+        JSON.stringify({
+          snapshot: prepared.snapshot?.id,
+          authorization: actionAuthorization,
+          originalRequest,
+          runtimeSystemPrompt,
+          runtimeSettings,
+          semanticEnabled,
+          hasUI: context.hasUI,
+          consent: prepared.repository.getRemoteConsent(),
+          maintenanceRevision: coordinator.maintenanceRevision,
+        }),
+      )
+      .digest("hex");
+    const previous = coordinator.actions.get(dispatchId);
+    if (previous !== undefined) {
+      if (previous.inputDigest !== inputDigest || previous.policyDigest !== policyDigest) {
+        return {
+          block: true,
+          reason: brandPolicyText(
+            "Tool-call ID was reused with changed input or policy context. Submit a new tool call.",
+          ),
+        };
+      }
+      return previous.result;
     }
-    return result;
+    // Retain completed decisions to absorb late duplicate deliveries, but never
+    // evict in-flight enforcement or a pending real tool outcome.
+    for (const [id, entry] of coordinator.actions) {
+      if (coordinator.actions.size < MAX_COORDINATED_ACTIONS) break;
+      if (entry.settled && entry.outcome === undefined) coordinator.actions.delete(id);
+    }
+    if (coordinator.actions.size >= MAX_COORDINATED_ACTIONS) {
+      return { block: true, reason: brandPolicyText("Too many pending policy actions.") };
+    }
+    const entry: CoordinatedAction = {
+      inputDigest,
+      policyDigest,
+      settled: false,
+      result: Promise.resolve().then(async () => {
+        try {
+          const { decision, snapshot } = await evaluateAction(
+            action,
+            context,
+            undefined,
+            actionAuthorization,
+            semanticEnabled,
+            runtimeSettings.confirmationThreshold,
+            prepared,
+          );
+          const result = await applyOmpToolDecision(decision, context, action);
+          await recordDecision(action, decision, snapshot, context, result?.block === true);
+          if (result?.block === true) {
+            await recordOutcome(action, snapshot, context, "blocked");
+          } else {
+            entry.outcome = async (isError) => {
+              await recordOutcome(action, snapshot, context, isError ? "error" : "success");
+              if (
+                !isError &&
+                snapshot !== undefined &&
+                actionMayMutatePolicySources(action, snapshot)
+              ) {
+                prepared.repository.markStale(snapshot.projectRoot);
+                refreshStatus(context, prepared.repository);
+              }
+            };
+          }
+          return result;
+        } finally {
+          entry.settled = true;
+        }
+      }),
+    };
+    coordinator.actions.set(dispatchId, entry);
+    return entry.result;
   });
 
   pi.on("tool_result", async (event, context) => {
-    const pending = pendingActions.get(event.toolCallId);
-    if (pending === undefined) {
-      return;
-    }
-    pendingActions.delete(event.toolCallId);
-    await recordOutcome(
-      pending.action,
-      pending.snapshot,
-      context,
-      event.isError ? "error" : "success",
+    const entry = coordinatorFor(context).actions.get(
+      JSON.stringify([event.toolCallId, event.toolName]),
     );
-    if (
-      !event.isError &&
-      pending.snapshot !== undefined &&
-      actionMayMutatePolicySources(pending.action, pending.snapshot)
-    ) {
-      const repository = await repositoryPromise;
-      repository.markStale(pending.snapshot.projectRoot);
-      refreshStatus(context, repository);
-    }
+    if (entry === undefined) return;
+    await entry.result;
+    const outcome = entry.outcome;
+    if (outcome === undefined) return;
+    delete entry.outcome;
+    await outcome(event.isError);
   });
 
   pi.on("user_bash", async (event, context) => {
@@ -508,7 +706,10 @@ export function registerOmpPolicyRuntime(
       context.sessionManager.getSessionId(),
       "user_bash",
     );
-    const directAuthorization = currentTurnAuthorization(action);
+    const directAuthorization = currentTurnAuthorization(
+      action,
+      collectShellRequestContext(context.sessionManager) ?? requestContext,
+    );
     const { decision, snapshot } = await evaluateAction(
       action,
       context,
@@ -560,6 +761,13 @@ export function registerOmpPolicyRuntime(
   });
 
   pi.on("session_stop", async (event, context) => {
+    // Interactive session-stop handlers run after the response is already
+    // visible. Even without a dialog, evaluation and continuation work races
+    // the user's next draft and can consume its first input byte. Keep this
+    // post-response surface entirely inert when an editor is present.
+    if (context.hasUI) {
+      return;
+    }
     if (lastContinuationTurn === event.turn_id) {
       return;
     }
@@ -575,9 +783,8 @@ export function registerOmpPolicyRuntime(
       details: { event: "session_stop" },
       hostAction: { host: "omp", name: "session_stop", input: {} },
     };
-    // A modal opened after the assistant's visible response can consume the
-    // first byte intended for the next draft. Resolve workflow uncertainty with
-    // the configured automatic default; the continuation carries any denial.
+    // Headless sessions have no prompt editor to disrupt. Resolve uncertainty
+    // automatically; the continuation carries any denial.
     const { decision, snapshot } = await evaluateAction(
       action,
       context,
@@ -621,8 +828,11 @@ export function registerOmpPolicyRuntime(
           "info",
         );
       } else if (command === "maintenance") {
+        const coordinator = coordinatorFor(context);
+        const maintenance = coordinator.maintenance;
         if (value === "revoke") {
           maintenance.clear();
+          coordinator.maintenanceRevision += 1;
           context.ui.notify(brandPolicyText("Maintenance authorization cleared."), "info");
         } else if (value === "approve" && actionId !== undefined) {
           await onboard(context);
@@ -634,6 +844,7 @@ export function registerOmpPolicyRuntime(
           const approved =
             snapshot !== undefined &&
             maintenance.approve(actionId, snapshot, context.sessionManager.getSessionId());
+          if (approved) coordinator.maintenanceRevision += 1;
           context.ui.notify(
             brandPolicyText(
               approved
@@ -688,6 +899,11 @@ export function registerOmpPolicyRuntime(
 
   pi.on("session_shutdown", async (_event, context) => {
     context.ui.setStatus(STATUS_KEY, undefined);
+    const coordinator = attached?.coordinator;
+    if (coordinator !== undefined) {
+      await Promise.allSettled([...coordinator.actions.values()].map((entry) => entry.result));
+    }
+    detach();
     (await repositoryPromise).close();
   });
 
@@ -697,14 +913,15 @@ export function registerOmpPolicyRuntime(
     context: ExtensionContext,
     outcome: "success" | "error" | "blocked",
   ): Promise<void> {
-    if (activeProjectRoot === undefined) {
+    const projectRoot = snapshot?.projectRoot ?? activeProjectRoot;
+    if (projectRoot === undefined) {
       return;
     }
     const repository = await repositoryPromise;
     repository.appendAudit({
       phase: "result",
       actionId: action.id,
-      projectRoot: activeProjectRoot,
+      projectRoot,
       ...(snapshot === undefined ? {} : { snapshotId: snapshot.id }),
       occurredAtMs: Date.now(),
       operation: action.operation,
@@ -756,13 +973,17 @@ function summarizeTargets(action: PolicyAction): readonly string[] {
   return action.targets.map((target) => `${target.kind}:${redactText(target.value).slice(0, 200)}`);
 }
 
-function currentTurnAuthorization(action: PolicyAction): AuthorizationEnvelope {
+function currentTurnAuthorization(
+  action: PolicyAction,
+  requestContext?: AuthorizationEnvelope["requestContext"],
+): AuthorizationEnvelope {
   return {
     source: "current-turn",
     explicit: true,
     scope: "exact-action",
     actionDigest: digestPolicyAction(action),
     summary: "The user directly requested this exact action.",
+    ...(requestContext === undefined ? {} : { requestContext }),
   };
 }
 

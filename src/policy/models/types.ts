@@ -31,8 +31,17 @@ export interface PolicyModelDiagnostics {
   readonly rawConfidence?: number;
   readonly hardViolationProbability?: number;
   readonly adapterEffect?: "allow" | "prompt" | "deny";
-  readonly decisionBasis?: "choice" | "hard-violation" | "low-confidence" | "chunk-aggregation";
+  readonly decisionBasis?:
+    | "choice"
+    | "hard-violation"
+    | "low-confidence"
+    | "ungrounded-denial"
+    | "chunk-aggregation";
   readonly attribution?: "validated" | "none" | "invalid" | "missing";
+  readonly attributionConfidence?: number;
+  /** A request-local selection mapped to a known rule; not necessarily validated. */
+  readonly attributionCandidateRuleId?: string;
+  readonly attributionVerificationProbability?: number;
   readonly unavailableReason?: PolicyModelUnavailableReason;
   readonly stateBytes?: number;
   readonly chunks?: readonly {

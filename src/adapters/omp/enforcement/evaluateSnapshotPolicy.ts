@@ -13,6 +13,7 @@ import type {
 import type { PolicyModelDiagnostics, PolicyModelResult } from "../../../policy/models/types.js";
 import { selectApplicableRules } from "../../../policy/sources/selectApplicableRules.js";
 import { evaluateLocalPolicy } from "./evaluateLocalPolicy.js";
+import { redactText } from "../../typesafe/redactProviderState.js";
 
 export interface PolicyConfirmationSettings {
   readonly defaultAction: "approve" | "deny";
@@ -210,7 +211,26 @@ export async function evaluateSnapshotPolicy(
     return resolveConfirmation(decision, undefined, options.confirmation, false);
   }
 
-  const ruleIds = invalidAttribution ? [] : [...new Set(result.ruleIds ?? [])];
+  const invalidGrounding =
+    invalidAttribution ||
+    (result.diagnostics?.attribution !== undefined &&
+      result.diagnostics.attribution !== "validated");
+  const ruleIds = invalidGrounding ? [] : [...new Set(result.ruleIds ?? [])];
+  if (result.effect === "deny" && ruleIds.length === 0) {
+    result = {
+      ...result,
+      effect: "prompt",
+      diagnostics: {
+        ...result.diagnostics,
+        status: "assessed",
+        providerId: model?.providerId ?? "unresolved",
+        requestedModel: model?.modelVersion ?? result.model,
+        adapterEffect: "prompt",
+        decisionBasis: "ungrounded-denial",
+        attribution: invalidAttribution ? "invalid" : (result.diagnostics?.attribution ?? "none"),
+      },
+    };
+  }
   const semantic: PolicyModelDiagnostics = {
     status: "assessed",
     providerId: model?.providerId ?? "unresolved",
@@ -233,7 +253,7 @@ export async function evaluateSnapshotPolicy(
       ? { effect, evidence }
       : {
           effect,
-          reason: formatSemanticReason(result, semantic, ruleIds),
+          reason: formatSemanticReason(result, semantic, ruleIds, snapshot),
           evidence,
         },
     applicableRuleIds,
@@ -307,6 +327,10 @@ function attachDiagnostics(
                 ruleId: matched.id,
                 sourceId: matched.sourceId,
                 ...(source === undefined ? {} : { sourcePath: source.path }),
+                statement: redactText(matched.statement),
+                ...(matched.context === undefined
+                  ? {}
+                  : { context: matched.context.map(redactText) }),
               },
             }),
       },
@@ -372,16 +396,24 @@ function formatSemanticReason(
   result: Extract<PolicyModelResult, { kind: "decision" }>,
   diagnostics: PolicyModelDiagnostics,
   ruleIds: readonly string[],
+  snapshot: PolicySnapshot | undefined,
 ): string {
   const hardViolation =
     diagnostics.decisionBasis === "hard-violation" ||
     (diagnostics.decisionBasis === "chunk-aggregation" &&
-      diagnostics.chunks?.some((chunk) => chunk.diagnostics.decisionBasis === "hard-violation"));
+      diagnostics.chunks?.some(
+        (chunk) =>
+          chunk.diagnostics.adapterEffect === "deny" &&
+          chunk.diagnostics.decisionBasis === "hard-violation",
+      ));
   let reason: string;
-  if (hardViolation) {
-    reason = `The semantic assessment identified a hard-rule violation (hard-rule probability ${formatProbability(result.hardViolationProbability)}).`;
+  if (diagnostics.decisionBasis === "ungrounded-denial") {
+    reason =
+      "The model suggested denial without a validated applicable rule. This is unresolved evidence, not an established policy violation.";
+  } else if (hardViolation && result.effect === "deny") {
+    reason = `The model assessed a hard-rule conflict (hard-rule probability ${formatProbability(result.hardViolationProbability)}).`;
   } else if (result.effect === "deny") {
-    reason = `The model explicitly chose deny (decision confidence ${formatProbability(result.confidence)}; hard-rule probability ${formatProbability(result.hardViolationProbability)}).`;
+    reason = `The model assessed a policy conflict (deny confidence ${formatProbability(result.confidence)}; hard-rule probability ${formatProbability(result.hardViolationProbability)}).`;
   } else if (diagnostics.decisionBasis === "low-confidence") {
     reason = `The model${diagnostics.rawChoice === undefined ? "" : ` chose ${diagnostics.rawChoice} but`} was too uncertain to authorize the action (decision confidence ${formatProbability(result.confidence)}); confirmation is required.`;
   } else if (diagnostics.decisionBasis === "chunk-aggregation") {
@@ -406,8 +438,12 @@ function formatSemanticReason(
     reason +=
       " No violation was identified by the model; this is uncertainty, not a rule-violation finding.";
   }
-  if (ruleIds.length > 0) {
-    reason += ` Identified rule references: ${ruleIds.join(", ")}.`;
+  const matched = snapshot?.rules.find((rule) => rule.id === ruleIds[0]);
+  if (matched !== undefined) {
+    reason += ` Rule: ${matched.statement}`;
+    if (matched.context !== undefined && matched.context.length > 0) {
+      reason += ` Scope: ${matched.context.join(" > ")}.`;
+    }
   }
   return reason;
 }

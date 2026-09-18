@@ -90,6 +90,35 @@ describe("evaluateLocalPolicy", () => {
     ).toBeUndefined();
   });
 
+  it("does not elevate procedure-scoped bans or documented commands into direct file violations", async () => {
+    const root = await project();
+    const policy = snapshot(
+      root,
+      "## Tuning procedure\n\nDuring a classifier tuning probe:\n\n### Restrictions\n\nNever read `.env`.\n\n## Standing protection\n\nNever write `protected.txt`.",
+    );
+    expect(
+      await evaluateLocalPolicy(action(root, "read", { path: ".env" }), policy),
+    ).toBeUndefined();
+    expect(
+      await evaluateLocalPolicy(
+        action(root, "write", {
+          path: "development.md",
+          content:
+            "For development only:\n```sh\nbun run build\nomp plugin link .\n```\nNever read .env.",
+        }),
+        policy,
+      ),
+    ).toBeUndefined();
+    expect(
+      (
+        await evaluateLocalPolicy(
+          action(root, "write", { path: "protected.txt", content: "replacement" }),
+          policy,
+        )
+      )?.effect,
+    ).toBe("deny");
+  });
+
   it("matches canonical aliases and encoded selectors without confusing siblings", async () => {
     const root = await project();
     await symlink(join(root, "protected.txt"), join(root, "alias.txt"));

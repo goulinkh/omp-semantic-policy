@@ -142,6 +142,13 @@ function extractTargets(
       addStringTarget(targets, "path", match[1] ?? match[2] ?? match[3] ?? match[4] ?? match[5]);
     }
   }
+  if (toolName === "edit" && Array.isArray(input.edits)) {
+    for (const edit of input.edits) {
+      if (typeof edit === "object" && edit !== null) {
+        addStringTarget(targets, "path", getString(edit, "rename"));
+      }
+    }
+  }
   addStringArrayTargets(targets, "path", input.files);
 
   switch (toolName) {
@@ -621,16 +628,46 @@ function selectDispatchIntent(
       break;
     }
     case "edit":
+      select(["input", "path", "old_string", "new_string", "replace_all", "edits"]);
+      if (input.input !== undefined) {
+        requireString("input");
+      } else {
+        requireString("path");
+        if (input.edits !== undefined) {
+          if (
+            !Array.isArray(input.edits) ||
+            input.edits.length === 0 ||
+            !input.edits.every(
+              (edit: unknown) =>
+                typeof edit === "object" &&
+                edit !== null &&
+                (("old_string" in edit &&
+                  typeof edit.old_string === "string" &&
+                  "new_string" in edit &&
+                  typeof edit.new_string === "string") ||
+                  ("diff" in edit && typeof edit.diff === "string") ||
+                  ("op" in edit && edit.op === "delete") ||
+                  ("rename" in edit && typeof edit.rename === "string")),
+            )
+          )
+            complete = false;
+        } else if (typeof input.old_string !== "string" || typeof input.new_string !== "string") {
+          complete = false;
+        }
+      }
       if (
         getString(input, "path") === undefined &&
         extractTargets(tool, input).every((target) => target.kind !== "path")
       )
         complete = false;
       break;
-    case "read":
     case "write":
+      select(["path", "content"]);
       requireString("path");
-      if (tool === "write" && typeof input.content !== "string") complete = false;
+      if (typeof input.content !== "string") complete = false;
+      break;
+    case "read":
+      requireString("path");
       break;
     case "glob":
       if (input.path !== undefined && input.path !== null && typeof input.path !== "string")

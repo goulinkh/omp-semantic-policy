@@ -129,6 +129,11 @@ describe("normalizeOmpToolCall", () => {
       ["task", { tasks: [{ task: 17 }] }],
       ["write", { path: "xd://debug", content: "not-json" }],
       ["write", { path: "xd://lsp", content: "[]" }],
+      ["write", { path: "settings.txt" }],
+      ["edit", { path: "settings.txt" }],
+      ["edit", { path: "settings.txt", old_string: "previous" }],
+      ["edit", { path: "settings.txt", edits: [] }],
+      ["edit", { path: "settings.txt", edits: ["not-an-edit"] }],
       ["debug", { action: "evaluate" }],
       ["hub", { op: "start", application: "sh", args: [42] }],
       ["hub", { op: "send", name: "shell", keys: [] }],
@@ -248,17 +253,21 @@ describe("normalizeOmpToolCall", () => {
     }
   });
 
-  it("exposes protected rename destinations in both supported freeform edit syntaxes", () => {
+  it("exposes protected rename destinations in supported edit formats", () => {
     for (const input of [
-      '*** Begin Patch\n[src/file.ts#A123]\nMV ".env"\n*** End Patch',
-      "*** Begin Patch\n*** Update File: src/file.ts\n*** Move to: .env\n@@\n-old\n+new\n*** End Patch",
+      { input: '*** Begin Patch\n[src/file.ts#A123]\nMV ".env"\n*** End Patch' },
+      {
+        input:
+          "*** Begin Patch\n*** Update File: src/file.ts\n*** Move to: .env\n@@\n-old\n+new\n*** End Patch",
+      },
+      { path: "src/file.ts", edits: [{ rename: ".env" }] },
     ]) {
       const action = normalizeOmpToolCall(
         {
           type: "tool_call",
           toolCallId: "edit-move",
           toolName: "edit",
-          input: { input },
+          input,
         },
         context,
       );

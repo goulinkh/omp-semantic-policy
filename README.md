@@ -23,10 +23,10 @@ An [Oh My Pi (OMP)](https://github.com/can1357/oh-my-pi) plugin that checks agen
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/policy-flow/policy-evaluation-dark.svg">
   <source media="(prefers-color-scheme: light)" srcset="docs/assets/policy-flow/policy-evaluation-light.svg">
-  <img src="docs/assets/policy-flow/policy-evaluation-light.svg" alt="Capture and scope an action, evaluate locally or with TypeSafe AI, then enforce and audit. Uncertainty is automatically accepted; explicit denials block. A policy gate, not a sandbox." width="1400">
+  <img src="docs/assets/policy-flow/policy-evaluation-light.svg" alt="Capture and scope an action, evaluate locally or with TypeSafe AI, then enforce and audit. Uncertainty is automatically accepted; grounded denials block. A policy gate, not a sandbox." width="1400">
 </picture>
 
-**A policy gate, not a sandbox.** Uncertainty is automatically accepted; explicit denials block.
+**A policy gate, not a sandbox.** Uncertainty is automatically accepted; grounded denials block.
 
 ## Get started
 
@@ -88,18 +88,22 @@ Maintenance approval applies to one exact retry, not blanket authorization.
 ### Status and feedback
 
 - `showStatus` (default: `true`): Show policy state in the status bar.
-- `showViolationFeedback` (default: `true`): Show direct-action and workflow outcome notifications. Tool denials stay attached to their own result cards; confirmation dialogs identify the exact action.
+- `showViolationFeedback` (default: `true`): Show direct-action and headless workflow outcome notifications. Tool denials stay attached to their own result cards; confirmation dialogs identify the exact action.
 
 ### Confirmation
 
-- `confirmationDefault` (default: `approve`): Automatically accept confirmation requests, including unavailable-evaluator fallbacks. Set `deny` for fail-closed automatic resolution. Explicit policy denials remain blocked.
+- `confirmationDefault` (default: `approve`): Automatically accept confirmation requests, including ungrounded model denials and unavailable-evaluator fallbacks. Set `deny` for fail-closed automatic resolution. Grounded policy denials remain blocked.
 - `confirmationThreshold` (default: `1`): Automatic mode, without dialogs, including headless sessions. Set below `1` to enable interactive confirmation at or above that confidence; `0` prompts for every uncertain checked action. Explicitly enabled prompts deny without an interactive UI.
 
-Session-stop workflow checks stay automatic and use `confirmationDefault`, so they do not interrupt the next prompt.
+Interactive sessions skip post-response workflow evaluation entirely so extension work cannot race or consume the next draft's first keystroke. Headless session-stop checks remain automatic and use `confirmationDefault`.
 
-The model decision-confidence cutoff is **50%**: a 53% `allow` no longer becomes a confirmation request solely because of confidence. The hard-violation cutoff remains **80%**, and rule attribution still requires **65%**. Existing explicit settings are preserved; use `confirmationDefault: approve` and `confirmationThreshold: 1` to adopt automatic acceptance.
+The model's allow-confidence cutoff is **50%**, while deny confidence requires **80%**. A hard-violation probability of **80%** can also trigger denial, but **every semantic denial requires a matched applicable rule**. Citation-choice confidence of **65%** establishes attribution directly. If an otherwise blocking assessment selects a known rule below that cutoff, one additional check can establish that specific violation at **80%** probability; competing valid citations need not concentrate on one choice. No selected rule, failed verification, or unresolved evidence does not establish a violation. Automatic mode deliberately accepts uncertainty, not compliance. Deterministic local protections and incomplete-action guards remain blocking. Existing explicit settings are preserved.
 
-Blocked results name the tool, a redacted action summary, and the action ID. Feedback distinguishes uncertainty from a violation and links to `/policy audit`; a different tool is not an approval workaround.
+Blocked tool cards separate the action, readable rule, source file, and next step. Prohibitions retain their `Don't` meaning. IDs, probability scores, full provenance, and confirmation diagnostics remain in `/policy audit`, not the compact card. Execution feedback includes the working directory and environment override names, never their values. If a source is incorrectly scoped, correct it and run `/policy onboard`; a different tool is not an approval workaround.
+
+Remote mutation checks include proposed content, bounded original source, and explicit before/after hunks for supported edits. The hunks describe proposed changes, not executed results. Stale anchors, unsupported operations, missing files, and omitted evidence are marked unavailable or partial rather than guessed. Inspection respects local read prohibitions and canonical project boundaries.
+
+Shell checks also include bounded recent user text and the preceding assistant proposal, so a short confirmation or refusal retains its subject. Assistant text is not permission; conversational approval never overrides an absolute prohibition. Recognized credentials are redacted, but arbitrary sensitive text may remain. Automatic acceptance of uncertainty is unchanged: better evidence does not guarantee detection.
 
 ### Remote tool coverage
 
@@ -109,11 +113,11 @@ Blocked results name the tool, a redacted action summary, and the action ID. Fee
 
 - `disabledToolCalls` (default: empty): A comma-separated list of tool names to exclude from remote evaluation. Takes precedence over `enabledToolCalls`.
 
-These filters only affect remote tool evaluation. Local protections, incomplete-intent checks, and direct shell, Python, and workflow gates still apply.
+These filters only affect remote tool evaluation. Local protections, incomplete-intent checks, direct shell and Python gates, and headless workflow gates still apply.
 
 ## Coverage limits
 
-- Host hooks gate tool calls. Broad execution and restricted subagents are dispatch-only.
+- Host hooks gate tool calls. Broad execution and restricted subagents are dispatch-only; session-stop workflow enforcement is headless-only because interactive post-response hooks race the next draft.
 - Nested effects, utility commands, and trusted extensions are not contained.
 - Local path checks cover a narrow literal-path grammar, not all prose, filesystem races, or unseen LSP effects.
 

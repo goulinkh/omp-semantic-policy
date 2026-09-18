@@ -332,6 +332,45 @@ describe("TypeSafe policy model", () => {
     expect(gate.calls).toHaveLength(3);
   });
 
+  test("an ungrounded hard score cannot explain an independently grounded denial", async () => {
+    const request = createChunkedRequest(2);
+    const gate = createGatedFetch();
+    const model = createTypeSafePolicyModel({
+      apiKey: "fixture-key",
+      hasConsent: () => true,
+      fetch: gate.fetch,
+    });
+    const pending = model.evaluate(request);
+    await gate.waitForCount(2);
+    gate.respond(0, modelResponse("allow", 0.25, 0.99));
+    gate.respond(1, modelResponse("deny", 0.85, 0.1, gate.alias(1)));
+    expect(await pending).toMatchObject({
+      kind: "decision",
+      effect: "deny",
+      confidence: 0.85,
+      hardViolationProbability: 0.1,
+      ruleIds: [request.snapshot.rules[1]?.id],
+      diagnostics: {
+        hardViolationProbability: 0.1,
+        chunks: [
+          {
+            ruleIds: [],
+            diagnostics: {
+              adapterEffect: "prompt",
+              decisionBasis: "ungrounded-denial",
+              hardViolationProbability: 0.99,
+              attribution: "none",
+            },
+          },
+          {
+            ruleIds: [request.snapshot.rules[1]?.id],
+            diagnostics: { adapterEffect: "deny", decisionBasis: "choice" },
+          },
+        ],
+      },
+    });
+  });
+
   test("one uncertain chunk prevents allow and cites only the prompting chunk", async () => {
     const request = createChunkedRequest(2);
     const model = createTypeSafePolicyModel({
@@ -480,9 +519,15 @@ describe("TypeSafe policy model", () => {
         apiKey: "fixture-key",
         hasConsent: () => true,
         fetch: async (_input, init) => {
-          const index = parseWireRequest(init?.body).state.policy.partition?.index;
+          const { state } = parseWireRequest(init?.body);
+          const index = state.policy.partition?.index;
           return jsonResponse({
-            ...modelResponse("allow", 0.99, deny && index === 1 ? 0.8 : 0.01),
+            ...modelResponse(
+              "allow",
+              0.99,
+              deny && index === 1 ? 0.8 : 0.01,
+              state.policy.rules[0]?.[0],
+            ),
             model: index === 0 ? "resolved-a" : "resolved-b",
           });
         },
@@ -608,74 +653,250 @@ describe("TypeSafe policy model", () => {
     expect(captured).toHaveLength(0);
   });
 
-  test("allows the reported byte-count inspection at 53% without weakening confidence or hard-denial boundaries", async () => {
-    const request = createRequest();
-    const command = "wc -c dist/index.js";
-    const action = {
-      ...createTestPolicyAction("execute"),
-      targets: [{ kind: "command" as const, value: command }],
-      details: { command },
-      hostAction: { host: "omp", name: "bash", input: { command } },
-    };
+  test("keeps separate allow, grounded deny, and hard-override confidence boundaries", async () => {
     for (const [choice, confidence, hardViolation, effect, basis] of [
       ["allow", 0.53, 0.1, "allow", "choice"],
       ["allow", 0.5, 0.1, "allow", "choice"],
-      ["allow", 0.499, 0.1, "allow", "low-confidence"],
-      ["allow", 0.499, 0.8, "deny", "hard-violation"],
-      ["prompt", 0.53, 0.1, "allow", "choice"],
-      ["deny", 0.53, 0.1, "deny", "choice"],
+      ["allow", 0.499, 0.1, "prompt", "low-confidence"],
+      ["deny", 0.799, 0.1, "prompt", "low-confidence"],
+      ["deny", 0.8, 0.1, "deny", "choice"],
+      ["allow", 0.25, 0.799, "prompt", "low-confidence"],
+      ["allow", 0.25, 0.8, "deny", "hard-violation"],
+      ["prompt", 0.99, 0.1, "prompt", "choice"],
+    ] as const) {
+      const model = createTypeSafePolicyModel({
+        apiKey: "fixture-key",
+        hasConsent: () => true,
+        fetch: createFetch([], modelResponse(choice, confidence, hardViolation, "r0")),
+      });
+      expect(await model.evaluate(createRequest())).toMatchObject({
+        kind: "decision",
+        effect,
+        confidence: basis === "hard-violation" ? hardViolation : confidence,
+        ruleIds: ["root-rule"],
+        diagnostics: { decisionBasis: basis, attribution: "validated" },
+      });
+    }
+  });
+
+  test("treats reported denials and hard overrides without matched rules as uncertainty", async () => {
+    for (const [choice, confidence, hardViolation] of [
+      ["deny", 0.6, 0.1],
+      ["deny", 0.75, 0.1],
+      ["deny", 0.99, 0.1],
+      ["allow", 0.25, 0.8],
     ] as const) {
       const model = createTypeSafePolicyModel({
         apiKey: "fixture-key",
         hasConsent: () => true,
         fetch: createFetch([], modelResponse(choice, confidence, hardViolation)),
       });
-      const decision = await evaluateSnapshotPolicy({
-        action,
-        snapshot: request.snapshot,
-        context: { headless: true },
-        model,
+      expect(await model.evaluate(createRequest())).toMatchObject({
+        kind: "decision",
+        effect: "prompt",
+        confidence,
+        hardViolationProbability: hardViolation,
+        ruleIds: [],
+        diagnostics: {
+          rawChoice: choice,
+          rawConfidence: confidence,
+          hardViolationProbability: hardViolation,
+          adapterEffect: "prompt",
+          decisionBasis: "ungrounded-denial",
+          attribution: "none",
+        },
       });
-      expect(decision.effect).toBe(effect);
-      expect(decision.evidence.diagnostics?.semantic?.decisionBasis).toBe(basis);
-      expect(decision.evidence.diagnostics?.confirmation.resolution).toBe(
-        basis === "low-confidence" || choice === "prompt" ? "automatic-approve" : "not-required",
-      );
-      if (choice === "prompt") {
-        const interactive = await evaluateSnapshotPolicy({
-          action,
-          snapshot: request.snapshot,
-          context: { headless: false },
-          model,
-          confirmation: { defaultAction: "deny", threshold: 0 },
-        });
-        expect(interactive.effect).toBe("prompt");
-      }
     }
   });
 
-  test("keeps rule attribution stricter than the decision-confidence cutoff", async () => {
-    const request = createRequest();
-    for (const attributionConfidence of [0.649, 0.65]) {
-      const response = modelResponse("deny", 0.53, 0.1, "r0");
+  test("grounds ambiguous citations independently without lowering either denial threshold", async () => {
+    for (const [citationConfidence, verificationProbability, expected] of [
+      [0.25, 0.799, "allow"],
+      [0.25, 0.8, "deny"],
+      [0.65, undefined, "deny"],
+    ] as const) {
+      const first = modelResponse("deny", 1, 0.97, "r0");
+      first.answers.matchedRule.confidence = citationConfidence;
+      const calls: CapturedRequest[] = [];
       const model = createTypeSafePolicyModel({
         apiKey: "fixture-key",
         hasConsent: () => true,
-        fetch: createFetch([], {
-          ...response,
-          answers: {
-            ...response.answers,
-            matchedRule: { ...response.answers.matchedRule, confidence: attributionConfidence },
-          },
-        }),
+        fetch: async (url, init) =>
+          createFetch(
+            calls,
+            calls.length === 0
+              ? first
+              : {
+                  model: DEFAULT_TYPESAFE_POLICY_MODEL,
+                  answers: { candidateViolation: { type: "noul", noul: verificationProbability } },
+                  usage: { input_tokens: 20, output_tokens: 3 },
+                },
+          )(url, init),
       });
-      const result = await model.evaluate(request);
+      const decision = await evaluateSnapshotPolicy({
+        ...createRequest(),
+        context: { headless: true },
+        model,
+        confirmation: { defaultAction: "approve", threshold: 1 },
+        maintenanceApproved: true,
+      });
+      expect(decision.effect).toBe(expected);
+      expect(decision.evidence.ruleIds).toEqual(expected === "deny" ? ["root-rule"] : []);
+      expect(decision.evidence.diagnostics?.semantic).toMatchObject({
+        attributionConfidence: citationConfidence,
+        attributionCandidateRuleId: "root-rule",
+        usage: {
+          inputTokens: verificationProbability === undefined ? 50 : 70,
+          outputTokens: verificationProbability === undefined ? 5 : 8,
+        },
+      });
+      expect(decision.evidence.diagnostics?.semantic?.attributionVerificationProbability).toBe(
+        verificationProbability,
+      );
+      expect(calls).toHaveLength(verificationProbability === undefined ? 1 : 2);
+      expect(JSON.stringify(calls)).not.toContain("super-secret-value");
+      expect(JSON.stringify(calls)).not.toContain("hostInputSecret");
+    }
+  });
+
+  test("does not verify citations when the assessment cannot establish a denial", async () => {
+    for (const [choice, confidence, hardViolation] of [
+      ["allow", 0.9, 0.1],
+      ["deny", 0.799, 0.799],
+      ["prompt", 0.99, 0.1],
+    ] as const) {
+      const response = modelResponse(choice, confidence, hardViolation, "r0");
+      response.answers.matchedRule.confidence = 0.25;
+      const captured: CapturedRequest[] = [];
+      const model = createTypeSafePolicyModel({
+        apiKey: "fixture-key",
+        hasConsent: () => true,
+        fetch: createFetch(captured, response),
+      });
+      const result = await model.evaluate(createRequest());
       expect(result).toMatchObject({
         kind: "decision",
-        effect: "deny",
-        ruleIds: attributionConfidence === 0.65 ? ["root-rule"] : [],
+        effect: choice === "allow" ? "allow" : "prompt",
+        ruleIds: [],
+        diagnostics: { attribution: "none", attributionConfidence: 0.25 },
       });
+      expect(captured).toHaveLength(1);
     }
+  });
+
+  test("revoked consent prevents citation verification egress", async () => {
+    const first = modelResponse("deny", 1, 0.97, "r0");
+    first.answers.matchedRule.confidence = 0.25;
+    let consent = true;
+    let calls = 0;
+    const model = createTypeSafePolicyModel({
+      apiKey: "fixture-key",
+      hasConsent: () => consent,
+      fetch: async () => {
+        calls++;
+        consent = false;
+        return jsonResponse(first);
+      },
+    });
+    expect(await model.evaluate(createRequest())).toMatchObject({
+      kind: "unavailable",
+      diagnostics: {
+        unavailableReason: "not-consented",
+        usage: { inputTokens: 50, outputTokens: 5 },
+      },
+    });
+    expect(calls).toBe(1);
+  });
+
+  test("caller cancellation aborts citation verification without retrying", async () => {
+    const first = modelResponse("deny", 1, 0.97, "r0");
+    first.answers.matchedRule.confidence = 0.25;
+    const gate = createGatedFetch();
+    const controller = new AbortController();
+    const model = createTypeSafePolicyModel({
+      apiKey: "fixture-key",
+      hasConsent: () => true,
+      fetch: gate.fetch,
+    });
+    const pending = model.evaluate(createRequest(), controller.signal);
+    await gate.waitForCount(1);
+    gate.respond(0, first);
+    await gate.waitForCount(2);
+    controller.abort();
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(gate.active()).toBe(0);
+    expect(gate.calls).toHaveLength(2);
+  });
+
+  test("invalid or failed verification never upgrades a candidate into a blocking citation", async () => {
+    for (const fault of ["probability", "model", "usage", "transport"] as const) {
+      const first = modelResponse("deny", 1, 0.97, "r0");
+      first.answers.matchedRule.confidence = 0.25;
+      let calls = 0;
+      const model = createTypeSafePolicyModel({
+        apiKey: "fixture-key",
+        hasConsent: () => true,
+        fetch: async () => {
+          if (++calls === 1) return jsonResponse(first);
+          if (fault === "transport") throw new Error("Synthetic transport failure");
+          return jsonResponse({
+            model: fault === "model" ? "different-model" : DEFAULT_TYPESAFE_POLICY_MODEL,
+            answers: {
+              candidateViolation: { type: "noul", noul: fault === "probability" ? 2 : 0.99 },
+            },
+            usage: { input_tokens: fault === "usage" ? -1 : 20, output_tokens: 3 },
+          });
+        },
+      });
+      expect(await model.evaluate(createRequest())).toMatchObject({
+        kind: "unavailable",
+        diagnostics: {
+          attribution: "none",
+          attributionCandidateRuleId: "root-rule",
+          unavailableReason: fault === "transport" ? "provider-error" : "invalid-response",
+        },
+      });
+      expect(calls).toBe(2);
+    }
+  });
+
+  test("citation verification preserves all primary chunks within the 64-request budget", async () => {
+    let primary = 0;
+    let verifications = 0;
+    const model = createTypeSafePolicyModel({
+      apiKey: "fixture-key",
+      hasConsent: () => true,
+      fetch: async (_url, init) => {
+        const body = JSON.parse(String(init?.body)) as CapturedWireRequest & {
+          questions: Record<string, unknown>;
+        };
+        if ("candidateViolation" in body.questions) {
+          verifications++;
+          return jsonResponse({
+            model: DEFAULT_TYPESAFE_POLICY_MODEL,
+            answers: { candidateViolation: { type: "noul", noul: 0.9 } },
+            usage: { input_tokens: 20, output_tokens: 3 },
+          });
+        }
+        primary++;
+        const first = modelResponse("deny", 1, 0.97, body.state.policy.rules[0]?.[0]);
+        first.answers.matchedRule.confidence = 0.25;
+        return jsonResponse(first);
+      },
+    });
+    const result = await model.evaluate(createChunkedRequest(33));
+    expect(primary).toBe(33);
+    expect(primary + verifications).toBe(64);
+    expect(result).toMatchObject({
+      kind: "decision",
+      effect: "deny",
+      diagnostics: { aggregation: { attemptedChunks: 33, assessedChunks: 31, complete: false } },
+    });
+    expect(
+      result.diagnostics?.chunks?.filter(
+        (chunk) => chunk.diagnostics.unavailableReason === "context-limit",
+      ),
+    ).toHaveLength(2);
   });
 
   test("records raw choice, threshold adaptation, and enforced confirmation separately", async () => {
@@ -708,7 +929,7 @@ describe("TypeSafe policy model", () => {
     });
   });
 
-  test("rejects invented or out-of-scope attribution without weakening a hard denial", async () => {
+  test("rejects invented or out-of-scope attribution as compliance evidence", async () => {
     const request = createRequest();
     for (const invalidId of ["invented-rule", "web-rule", "root-rule", "r1", "r00"]) {
       const model = createTypeSafePolicyModel({
@@ -723,18 +944,46 @@ describe("TypeSafe policy model", () => {
       });
       expect(JSON.stringify(invalid)).not.toContain(invalidId);
     }
-    const denyingModel = createTypeSafePolicyModel({
-      apiKey: "fixture-key",
-      hasConsent: () => true,
-      fetch: createFetch([], modelResponse("allow", 0.14, 0.91, "invented-rule")),
-    });
-    expect(await denyingModel.evaluate(request)).toMatchObject({
-      kind: "decision",
-      effect: "deny",
-      confidence: 0.91,
-      ruleIds: [],
-      diagnostics: { attribution: "invalid", decisionBasis: "hard-violation" },
-    });
+  });
+
+  test("missing or invalid citations cannot ground explicit denials or hard overrides", async () => {
+    for (const [matchedRule, attribution] of [
+      [undefined, "missing"],
+      [null, "invalid"],
+      [{ type: "choice", choice: "r0", confidence: 2 }, "invalid"],
+      [{ type: "choice", choice: "r1", confidence: 0.99 }, "invalid"],
+      [{ type: "choice", choice: "root-rule", confidence: 0.99 }, "invalid"],
+    ] as const) {
+      for (const [choice, confidence, hardViolation] of [
+        ["deny", 0.99, 0.1],
+        ["allow", 0.25, 0.8],
+      ] as const) {
+        const response = modelResponse(choice, confidence, hardViolation);
+        const { matchedRule: _matchedRule, ...answers } = response.answers;
+        const model = createTypeSafePolicyModel({
+          apiKey: "fixture-key",
+          hasConsent: () => true,
+          fetch: createFetch([], {
+            ...response,
+            answers: { ...answers, ...(matchedRule === undefined ? {} : { matchedRule }) },
+          }),
+        });
+        expect(await model.evaluate(createRequest())).toMatchObject({
+          kind: "decision",
+          effect: "prompt",
+          confidence,
+          ruleIds: [],
+          diagnostics: {
+            rawChoice: choice,
+            rawConfidence: confidence,
+            hardViolationProbability: hardViolation,
+            adapterEffect: "prompt",
+            attribution,
+            decisionBasis: "ungrounded-denial",
+          },
+        });
+      }
+    }
   });
 
   test("rejects malformed core decision evidence instead of treating it as uncertainty", async () => {

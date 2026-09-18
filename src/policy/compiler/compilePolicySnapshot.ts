@@ -8,7 +8,7 @@ import type {
   PolicyRuleClass,
 } from "../sources/types.js";
 
-export const POLICY_COMPILER_VERSION = "instruction-compiler-v3";
+export const POLICY_COMPILER_VERSION = "instruction-compiler-v4";
 
 export interface CompilePolicySnapshotOptions {
   readonly projectRoot: string;
@@ -145,6 +145,14 @@ function extractContextualStatements(content: string): readonly ContextualStatem
       flush();
       continue;
     }
+    // Tables are separate statements: a historical result row must not absorb
+    // an adjacent live prohibition, and normative cells still need assessment.
+    if (/^\|.*\|$/u.test(line)) {
+      flush();
+      current.push(line);
+      flush();
+      continue;
+    }
     const bullet = line.match(/^(?:[-*+] |\d+[.)] )(.*)$/u);
     if (bullet !== null) {
       flush();
@@ -156,11 +164,17 @@ function extractContextualStatements(content: string): readonly ContextualStatem
   }
   flush();
   const grouped: ContextualStatement[] = [];
+  let introductions: { readonly headings: readonly string[]; readonly statement: string }[] = [];
   for (let index = 0; index < statements.length; index += 1) {
     const entry = statements[index];
     if (entry === undefined) {
       continue;
     }
+    introductions = introductions.filter(
+      (item) =>
+        item.headings.length <= entry.context.length &&
+        item.headings.every((heading, depth) => heading === entry.context[depth]),
+    );
     const items = [entry.statement];
     if (!entry.listItem && entry.statement.endsWith(":")) {
       while (
@@ -177,22 +191,87 @@ function extractContextualStatements(content: string): readonly ContextualStatem
     }
     const statement = items.join(" ");
     const introduction = items.length > 1 ? entry.statement : undefined;
-    if (!isObviousDescription(statement, introduction)) {
+    const context = [...entry.context, ...introductions.map((item) => item.statement)];
+    if (!isObviousDescription(statement, introduction, context)) {
       grouped.push({
         statement,
-        context: entry.context,
+        context,
         ...(introduction === undefined ? {} : { introduction }),
       });
+    }
+    if (isScopeIntroduction(entry.statement)) {
+      introductions.push({ headings: entry.context, statement: entry.statement });
     }
   }
   return grouped;
 }
 
-function isObviousDescription(statement: string, introduction?: string): boolean {
+function isScopeIntroduction(statement: string): boolean {
+  return (
+    /^(?:these|the following)\s+(?:rules|restrictions|instructions|requirements|steps)\s+(?:apply|are (?:applicable|limited))\b/iu.test(
+      statement,
+    ) ||
+    /^(?:this|the)\s+(?:procedure|workflow|guide|section)\s+(?:applies|is (?:only )?for)\b/iu.test(
+      statement,
+    ) ||
+    (/^(?:if|when|while|during|for|before|after|unless)\b/iu.test(statement) &&
+      (statement.endsWith(":") ||
+        /\b(?:this|the|a|an)\s+(?:[\w-]+\s+){0,2}(?:procedure|workflow|probe|experiment|benchmark)\b/iu.test(
+          statement,
+        )))
+  );
+}
+
+function isObviousDescription(
+  statement: string,
+  introduction?: string,
+  context: readonly string[] = [],
+): boolean {
   if (/^examples?:$/iu.test(statement)) {
     return true;
   }
   if (/^(?:import\s+.+\s+from\s+["']|(?:export\s+)?(?:const|let|var)\s+\w+\s*=)/u.test(statement)) {
+    return true;
+  }
+  if (isHistoricalReport(statement)) {
+    return true;
+  }
+  const cells = statement.startsWith("|") ? statement.slice(1, -1).split("|") : undefined;
+  if (
+    cells !== undefined &&
+    (cells.every((cell) => /^\s*:?-{3,}:?\s*$/u.test(cell)) ||
+      (context.some((heading) =>
+        /\b(?:history|historical|recorded|results?|observations?|measurements?|evidence|experiments?|smoke)\b/iu.test(
+          heading,
+        ),
+      ) &&
+        cells.every(
+          (cell) =>
+            /^\s*(?:allow|deny|prompt|revise)(?:\s*\/\s*(?:allow|deny|prompt|revise))*\s*$/iu.test(
+              cell,
+            ) || !hasLiveConstraint(cell.trim()),
+        ) &&
+        cells.some((cell) =>
+          /^\s*(?:[\d,./×% -]+|(?:allow|deny|prompt|revise)(?:\s*\/\s*(?:allow|deny|prompt|revise))*|(?:[\w×/-]+\s+)*(?:bytes|latency|milliseconds|attempts|repetitions|outcomes?|effects?|aggregate))\s*$/iu.test(
+            cell,
+          ),
+        )))
+  ) {
+    return true;
+  }
+  if (/^(?:\[[^\]]+\]\([^)]+\)[\s·,;|./-]*)+$/u.test(statement)) {
+    return true;
+  }
+  if (
+    !hasLiveConstraint(statement) &&
+    statement
+      .split(/(?<=[.!?])\s+/u)
+      .every((sentence) =>
+        /^(?:(?:this|the)\s+(?:document|file|module|package|directory|section|example|table|diagram)|it)\s+(?:contains|provides|describes|documents|illustrates|shows|lists|includes)\b/iu.test(
+          sentence,
+        ),
+      )
+  ) {
     return true;
   }
   if (
@@ -221,6 +300,35 @@ function isObviousDescription(statement: string, introduction?: string): boolean
     ) ||
     /^(?:for example|e\.g\.)[:,]/iu.test(statement) ||
     /^(?:\|?\s*:?-{3,}:?\s*)+\|?$/u.test(statement)
+  );
+}
+
+/** Recognize reports positively; a heading never makes a live rule historical. */
+function isHistoricalReport(statement: string): boolean {
+  if (hasLiveConstraint(statement)) {
+    return false;
+  }
+  return statement
+    .split(/(?<=[.!?])\s+/u)
+    .every((sentence) =>
+      /^(?:(?:a|an|the|each|every|both|all|our|this|that)\s+(?:[\w`'().,-]+\s+){0,8}|we\s+)(?:evaluated|tested|observed|measured|recorded|reported|matched|completed|assessed|cited|used|loaded|exercised|denied|allowed|prohibited|blocked|were|was|had)\b/iu.test(
+        sentence,
+      ),
+    );
+}
+
+function hasLiveConstraint(statement: string): boolean {
+  return (
+    /\b(?:must|never|shall|should|do not|don't|cannot|can't|mustn't|shouldn't|may|unless|except|required|forbidden)\b/iu.test(
+      statement,
+    ) ||
+    /\b(?:is|are|remains?)\s+(?:\w+\s+){0,2}(?:prohibited|forbidden|required|allowed|permitted|restricted)\b/iu.test(
+      statement,
+    ) ||
+    /(?:^|[.!?;:]\s+)(?:always|only|no|avoid|prefer|keep|use|run|verify|ensure|retain|do|protect|restrict|require|forbid|deny|block|allow|permit|if|when|before|after)\b/iu.test(
+      statement,
+    ) ||
+    /\b(?:forbids|prohibits|requires|restricts|permits|allows|stays?|remains?)\b/iu.test(statement)
   );
 }
 
@@ -385,10 +493,12 @@ function compileLocalProhibition(
   statements: readonly ContextualStatement[],
 ): LocalPathProhibition | undefined {
   if (
-    context.some((heading) =>
-      /\b(?:if|when|unless|except(?:ions?)?|example|conditional|optional|before|after|until|without|during)\b/iu.test(
-        heading,
-      ),
+    context.some(
+      (heading) =>
+        isScopeIntroduction(heading) ||
+        /\b(?:if|when|unless|except(?:ions?)?|example|conditional|optional|before|after|until|without|during|procedure|workflow|probe|experiment|benchmark|tuning|maintenance|setup|cleanup|installation|deployment|migration)\b/iu.test(
+          heading,
+        ),
     ) ||
     statements.some(
       (entry) =>

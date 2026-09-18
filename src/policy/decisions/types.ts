@@ -29,6 +29,8 @@ export interface PolicyDecisionDiagnostics {
     readonly ruleId: string;
     readonly sourceId: string;
     readonly sourcePath?: string;
+    readonly statement?: string;
+    readonly context?: readonly string[];
   };
   readonly confirmation: PolicyConfirmationDiagnostics;
   readonly enforcedEffect: "allow" | "prompt" | "deny" | "revise";

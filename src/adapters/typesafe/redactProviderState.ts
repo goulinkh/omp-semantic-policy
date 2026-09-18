@@ -153,6 +153,10 @@ export type RedactedProviderState = {
     readonly scope?: "request" | "exact-action";
     readonly actionDigest?: string;
     readonly summary?: string;
+    readonly requestContext?: {
+      readonly status: "included" | "partial";
+      readonly messages: { readonly role: "user" | "assistant"; readonly text: string }[];
+    };
   };
 };
 
@@ -268,6 +272,17 @@ export function createRedactedProviderState(request: PolicyModelRequest): Redact
       ...(request.authorization?.summary === undefined
         ? {}
         : { summary: redactText(request.authorization.summary) }),
+      ...(request.authorization?.requestContext === undefined
+        ? {}
+        : {
+            requestContext: {
+              status: request.authorization.requestContext.status,
+              messages: request.authorization.requestContext.messages.map(({ role, text }) => ({
+                role,
+                text: redactText(text),
+              })),
+            },
+          }),
     },
   } satisfies EntryType;
 }

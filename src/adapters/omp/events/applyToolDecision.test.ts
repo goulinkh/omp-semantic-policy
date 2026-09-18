@@ -33,13 +33,11 @@ describe("applyOmpToolDecision", () => {
       applyOmpToolDecision(decision, context, second),
     ]);
     expect(wc?.block).toBe(true);
-    expect(wc?.reason).toContain("bash: wc -c dist/index.js");
-    expect(wc?.reason).toContain(first.id);
-    expect(wc?.reason).not.toContain(second.id);
+    expect(wc?.reason).toContain("wc -c dist/index.js");
+    expect(wc?.reason).not.toContain("cat private.txt");
     expect(cat?.block).toBe(true);
-    expect(cat?.reason).toContain("bash: cat private.txt");
-    expect(cat?.reason).toContain(second.id);
-    expect(cat?.reason).not.toContain(first.id);
+    expect(cat?.reason).toContain("cat private.txt");
+    expect(cat?.reason).not.toContain("wc -c dist/index.js");
     expect(wc?.reason).toContain("/policy audit");
     expect(wc?.reason).not.toContain("/policy maintenance");
     expect(confirmationRequested).toBe(false);
@@ -67,7 +65,7 @@ describe("applyOmpToolDecision", () => {
     });
     const result = await applyOmpToolDecision(decision, context, request);
     expect(result?.block).toBe(true);
-    expect(result?.reason).toContain(request.id);
+    expect(result?.reason).not.toContain(request.id);
     expect(result?.reason).toContain("/safe/output.txt");
     expect(result?.reason).not.toContain("private write body");
     expect(confirmationRequested).toBe(false);
@@ -96,8 +94,6 @@ describe("applyOmpToolDecision", () => {
     expect(result?.block).toBe(true);
     expect(confirmations).toHaveLength(1);
     for (const feedback of [confirmations[0], result?.reason]) {
-      expect(feedback).toContain("bash:");
-      expect(feedback).toContain(request.id);
       expect(feedback).toContain("https://example.test");
       expect(feedback).not.toContain("private-value");
     }

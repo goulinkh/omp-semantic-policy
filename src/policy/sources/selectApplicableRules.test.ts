@@ -346,4 +346,55 @@ Never read protected.txt.
       "web",
     ]);
   });
+
+  it("retains procedural conditions for docs writes and opaque execution instead of inferring global bans", () => {
+    const scope = "These restrictions apply only to a diagnostic procedure.";
+    const prohibition = "Do not link the plugin or install packages as part of a tuning probe.";
+    const snapshot = compilePolicySnapshot({
+      projectRoot: "/workspace/project",
+      versions,
+      sources: [
+        source(
+          "project",
+          `# Diagnostic procedure
+${scope}
+
+${prohibition}
+
+## Fixture access
+Never read .env.
+
+## Maintenance approval
+Incomplete actions remain ineligible for maintenance approval.
+
+# Standing policy
+The zephyr covenant forbids releasing moonstones.`,
+        ),
+      ],
+    });
+    const docsWrite: PolicyAction = {
+      ...createTestPolicyAction("write"),
+      targets: [{ kind: "path", value: "docs/install.md" }],
+      hostAction: {
+        host: "omp",
+        name: "write",
+        input: { path: "docs/install.md", content: "To install packages, run `bun install`." },
+      },
+    };
+    for (const action of [
+      docsWrite,
+      versionAction("bun install"),
+      versionAction("python arbitrary-script.py"),
+      createTestPolicyAction("delegate", "dispatch-only"),
+      createTestPolicyAction("unknown", "dispatch-only"),
+    ]) {
+      const selected = selectApplicableRules(snapshot, action);
+      expect(selected).toEqual(snapshot.rules);
+      const scoped = selected.find((rule) => rule.statement === prohibition);
+      expect(scoped?.context).toContain(scope);
+      const fixtureAccess = selected.find((rule) => rule.statement === "Never read .env.");
+      expect(fixtureAccess?.context).toContain(scope);
+      expect(fixtureAccess?.localEnforcement).toBeUndefined();
+    }
+  });
 });

@@ -169,18 +169,99 @@ describe("redacted dispatch evidence", () => {
     expect(redactText(`curl -d "token='$TOKEN'"`)).toContain("[REDACTED:EXPANSION]");
   });
 
-  it("does not transmit ordinary write content or unrelated host input", () => {
-    const state = createRedactedProviderState(
-      request("write", {
-        path: "src/new-file.ts",
-        content: "arbitrary-source-file-value",
-        unrelated: "host-input-secret",
+  it.each([
+    {
+      name: "write",
+      tool: "write",
+      input: (content: string) => ({ path: "settings.txt", content }),
+    },
+    {
+      name: "hashline edit",
+      tool: "edit",
+      input: (content: string) => ({
+        input: `*** Begin Patch\n[settings.txt#1234]\nPUT >1:\n+${content}\n*** End Patch`,
       }),
-    );
-    const serialized = JSON.stringify(state);
-    expect(serialized).not.toContain("arbitrary-source-file-value");
-    expect(serialized).not.toContain("host-input-secret");
-    expect(state.action.targets).toContainEqual({ kind: "path", value: "src/new-file.ts" });
+    },
+    {
+      name: "apply-patch edit",
+      tool: "edit",
+      input: (content: string) => ({
+        input: `*** Begin Patch\n*** Update File: settings.txt\n@@\n+${content}\n*** End Patch`,
+      }),
+    },
+    {
+      name: "replacement edit",
+      tool: "edit",
+      input: (content: string) => ({
+        path: "settings.txt",
+        old_string: "mode=previous",
+        new_string: content,
+        replace_all: true,
+      }),
+    },
+    {
+      name: "batched replacement edit",
+      tool: "edit",
+      input: (content: string) => ({
+        path: "settings.txt",
+        edits: [{ old_string: "mode=previous", new_string: content }],
+      }),
+    },
+    {
+      name: "structured patch edit",
+      tool: "edit",
+      input: (content: string) => ({
+        path: "settings.txt",
+        edits: [{ op: "update", diff: `@@\n-mode=previous\n+${content}` }],
+      }),
+    },
+  ])("keeps distinct changes to the same file distinguishable for $name", ({ tool, input }) => {
+    const firstContent = "mode=first";
+    const secondContent = "mode=second";
+    const first = createRedactedProviderState(request(tool, input(firstContent)));
+    const second = createRedactedProviderState(request(tool, input(secondContent)));
+    expect(second.action).not.toEqual(first.action);
+    expect(JSON.stringify(first.action)).toContain(firstContent);
+    expect(JSON.stringify(second.action)).toContain(secondContent);
+    expect(first.action.complete).toBe(true);
+    expect(second.action.complete).toBe(true);
+  });
+
+  it("redacts credentials in proposed mutations and excludes unrelated host input", () => {
+    for (const [tool, input] of [
+      [
+        "write",
+        {
+          path: "src/config.ts",
+          content: 'export const API_KEY = "mutation-private-value";',
+        },
+      ],
+      [
+        "edit",
+        {
+          path: "src/config.ts",
+          edits: [{ old_string: 'API_KEY = ""', new_string: 'API_KEY = "mutation-private-value"' }],
+        },
+      ],
+    ] as const) {
+      const state = createRedactedProviderState(
+        request(tool, { ...input, unrelated: "host-input-secret" }),
+      );
+      const serialized = JSON.stringify(state);
+      expect(serialized).toContain("[REDACTED:NONEMPTY]");
+      expect(serialized).not.toContain("mutation-private-value");
+      expect(serialized).not.toContain("host-input-secret");
+    }
+  });
+
+  it("does not certify oversized mutation evidence as a complete action", () => {
+    const content = "x".repeat(32_001);
+    for (const [tool, input] of [
+      ["write", { path: "settings.txt", content }],
+      ["edit", { path: "settings.txt", old_string: "", new_string: content }],
+    ] as const) {
+      expect(createRedactedProviderState(request(tool, input)).action.complete).toBe(false);
+    }
   });
 
   it("redacts spaced assignments and escaped form fields without losing parameter boundaries", () => {

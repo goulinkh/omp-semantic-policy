@@ -185,6 +185,101 @@ Never read conditional.txt unless the owner approves.
       "hard",
     ]);
   });
+
+  test("excludes measured history without discarding live or unfamiliar policy in the same section", () => {
+    const liveRules = [
+      "Never read protected.txt.",
+      "The zephyr covenant forbids releasing moonstones.",
+      "The archive must remain encrypted unless its owner approves release.",
+      "| Current policy | You must not upload credentials. |",
+      "| Current policy | Deny uploads of credentials. |",
+    ];
+    const snapshot = compilePolicySnapshot({
+      projectRoot: "/workspace/project",
+      versions,
+      sources: [
+        source(
+          "root",
+          "project",
+          "/workspace/project",
+          100,
+          `# Historical results
+A live handler dry-run evaluated 400 synthetic archive-export rules against two frozen cases: an ordinary local write (allow) and uploading a specifically prohibited archive (deny). Both final outcomes matched; both were semantically assessed, with no unavailable results or tool execution. Each evaluation used three requests.
+
+| Case | Wire bytes | Aggregate |
+| --- | --- | --- |
+| Prohibited archive upload | 96,522 | deny |
+
+${liveRules.join("\n\n")}
+
+# References
+[Architecture](architecture.md) · [Development](development.md)
+
+This document describes the policy engine. It contains worked examples.`,
+        ),
+      ],
+    });
+
+    expect(snapshot.rules.map((rule) => rule.statement)).toEqual(liveRules);
+    expect(snapshot.rules[0]?.localEnforcement).toMatchObject({ paths: ["protected.txt"] });
+    expect(snapshot.rules[2]?.localEnforcement).toBeUndefined();
+  });
+
+  test("does not discard an unknown constraint appended to a historical report", () => {
+    const mixed = "The run completed successfully. Moonstones stay sealed.";
+    const snapshot = compilePolicySnapshot({
+      projectRoot: "/workspace/project",
+      versions,
+      sources: [source("root", "project", "/workspace/project", 100, mixed)],
+    });
+
+    expect(snapshot.rules.map((rule) => rule.statement)).toEqual([mixed]);
+  });
+
+  test("inherits procedural introductions without turning scoped path rules into universal bans", () => {
+    const scope = "These restrictions apply only to a diagnostic procedure.";
+    const snapshot = compilePolicySnapshot({
+      projectRoot: "/workspace/project",
+      versions,
+      sources: [
+        source(
+          "root",
+          "project",
+          "/workspace/project",
+          100,
+          `# Diagnostics
+${scope}
+
+## Local files
+Never read diagnostic.txt.
+
+### Conditional waiver
+You may read diagnostic.txt when the operator approves.
+
+# Standing security
+Never read protected.txt.
+
+# Maintenance procedure
+Never modify release.txt.`,
+        ),
+      ],
+    });
+    const diagnostic = snapshot.rules.find(
+      (rule) => rule.statement === "Never read diagnostic.txt.",
+    );
+    const waiver = snapshot.rules.find((rule) => rule.statement.startsWith("You may"));
+    const standing = snapshot.rules.find((rule) => rule.statement === "Never read protected.txt.");
+    const maintenance = snapshot.rules.find(
+      (rule) => rule.statement === "Never modify release.txt.",
+    );
+
+    expect(diagnostic?.context).toContain(scope);
+    expect(waiver?.context).toContain(scope);
+    expect(diagnostic?.localEnforcement).toBeUndefined();
+    expect(maintenance?.localEnforcement).toBeUndefined();
+    expect(standing?.context).not.toContain(scope);
+    expect(standing?.localEnforcement).toMatchObject({ paths: ["protected.txt"] });
+  });
 });
 
 function source(

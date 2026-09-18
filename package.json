@@ -38,7 +38,7 @@
       "showViolationFeedback": {
         "type": "boolean",
         "default": true,
-        "description": "Show action-bound feedback for direct actions and workflow checks. Blocked tool calls always include policy feedback in their originating tool card, without session-wide notifications."
+        "description": "Show action-bound feedback for direct actions and headless workflow checks. Blocked tool calls always include policy feedback in their originating tool card, without session-wide notifications."
       },
       "confirmationDefault": {
         "type": "enum",
@@ -47,7 +47,7 @@
           "approve"
         ],
         "default": "approve",
-        "description": "Resolve confirmation requests automatically when no dialog is selected. Approve (default) accepts uncertainty, including unavailable-evaluator fallbacks; deny opts into fail-closed behavior. Explicit policy denials remain blocked."
+        "description": "Resolve confirmation requests automatically when no dialog is selected. Approve (default) accepts uncertainty, including ungrounded model denials and unavailable-evaluator fallbacks; deny opts into fail-closed behavior. Grounded policy denials remain blocked."
       },
       "confirmationThreshold": {
         "type": "number",
@@ -55,7 +55,7 @@
         "min": 0,
         "max": 1,
         "step": 0.05,
-        "description": "The default 1 keeps decisions automatic without dialogs, using confirmationDefault (approve by default). Set below 1 to prompt at or above that confidence; 0 prompts for every uncertain checked action. Session-stop workflow checks always resolve automatically. Explicitly selected prompts block without an interactive UI."
+        "description": "The default 1 keeps decisions automatic without dialogs, using confirmationDefault (approve by default). Set below 1 to prompt at or above this confidence; 0 prompts for every uncertain checked action. Interactive session-stop checks are skipped to protect the next draft; headless workflow checks resolve automatically. Explicitly selected prompts block without an interactive UI."
       },
       "enabledToolCalls": {
         "type": "string",
@@ -77,6 +77,7 @@
     "lint": "oxlint src scripts testing docs/assets/policy-flow",
     "test": "bun test",
     "test:e2e:provider": "bun testing/e2e/provider-project.ts",
+    "test:e2e:marketplace": "bun run build && OMP_MARKETPLACE_E2E=1 bun test testing/e2e/marketplace-install.test.ts",
     "tune:policy": "bun testing/e2e/policy-tuning.ts",
     "typecheck": "tsc --noEmit"
   },
@@ -92,6 +93,7 @@
   },
   "dependencies": {
     "@oh-my-pi/pi-ai": "18.1.19",
+    "@oh-my-pi/pi-natives": "18.1.19",
     "@oh-my-pi/pi-tui": "18.1.19",
     "@oh-my-pi/pi-utils": "18.1.19",
     "@typesafe-ai/sdk": "0.6.0"

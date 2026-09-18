@@ -65,6 +65,11 @@ export interface AuthorizationEnvelope {
   readonly scope?: "request" | "exact-action";
   readonly actionDigest?: string;
   readonly summary?: string;
+  /** Bounded conversational evidence, never an independently verified grant. */
+  readonly requestContext?: {
+    readonly status: "included" | "partial";
+    readonly messages: readonly { readonly role: "user" | "assistant"; readonly text: string }[];
+  };
 }
 
 export interface PolicySnapshotReference {

@@ -177,7 +177,7 @@ export function evaluationDiagram(theme: Theme): JSXElement {
         350,
         320,
         palette,
-        contextItem("Before effect", "Enabled tools · shell · Python · workflow", palette),
+        contextItem("Before effect", "Enabled tools · shell · Python · headless workflow", palette),
         contextItem("Context", "Snapshot + user authorization", palette),
         contextItem("Local scope check", "Operation · targets · scoped rules", palette),
       ),
@@ -222,7 +222,7 @@ export function evaluationDiagram(theme: Theme): JSXElement {
     ),
     diagramNote(
       "Automatic acceptance",
-      "Uncertainty passes without prompts. Explicit denials block.",
+      "Uncertainty passes without prompts. Grounded denials block.",
       palette,
     ),
     element(
