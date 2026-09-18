@@ -1,11 +1,4 @@
-<h1>
-  <picture>
-    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/policy-flow/policy-mark-dark.svg">
-    <source media="(prefers-color-scheme: light)" srcset="docs/assets/policy-flow/policy-mark-light.svg">
-    <img src="docs/assets/policy-flow/policy-mark-light.svg" alt="" width="32" align="absmiddle">
-  </picture>
-  OMP Semantic Policy
-</h1>
+# ![logo](docs/assets/policy-flow/policy-mark.svg "Logo") OMP Semantic Policy
 
 An [Oh My Pi (OMP)](https://github.com/can1357/oh-my-pi) plugin that checks agent actions against your project instructions and authorization. [TypeSafe AI](https://typesafe.ai/) provides semantic evaluation when remote checks are enabled.
 
