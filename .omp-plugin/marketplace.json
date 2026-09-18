@@ -1,0 +1,33 @@
+{
+  "name": "goulinkh",
+  "owner": {
+    "name": "goulinkh"
+  },
+  "metadata": {
+    "description": "OMP plugins maintained by goulinkh",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "omp-semantic-policy",
+      "source": "./dist",
+      "description": "Semantic policy enforcement for Oh My Pi",
+      "version": "0.1.0",
+      "author": {
+        "name": "goulinkh"
+      },
+      "homepage": "https://github.com/goulinkh/omp-semantic-policy/releases/tag/v0.1.0",
+      "repository": "https://github.com/goulinkh/omp-semantic-policy",
+      "keywords": [
+        "omp",
+        "policy",
+        "security"
+      ],
+      "category": "security",
+      "tags": [
+        "policy",
+        "semantic-policy"
+      ]
+    }
+  ]
+}

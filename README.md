@@ -37,13 +37,13 @@ An [Oh My Pi (OMP)](https://github.com/can1357/oh-my-pi) plugin that checks agen
 
 ## Get started
 
-Requires [Bun](https://bun.sh/) ≥1.3.14 and [OMP](https://github.com/can1357/oh-my-pi) 18.1.19. Remote evaluation also requires a [TypeSafe AI](https://typesafe.ai/) token and explicit consent.
+Requires [OMP](https://github.com/can1357/oh-my-pi) 18.1.19 or newer. Remote evaluation also requires a [TypeSafe AI](https://typesafe.ai/) token and explicit consent.
+
+Add the marketplace and install the plugin:
 
 ```bash
-git clone https://github.com/goulinkh/omp-semantic-policy.git
-cd omp-semantic-policy
-bun install --frozen-lockfile
-omp plugin link .
+omp plugin marketplace add goulinkh/omp-semantic-policy
+omp plugin install omp-semantic-policy@goulinkh
 ```
 
 Restart [OMP](https://github.com/can1357/oh-my-pi) inside a Git worktree, then:
@@ -55,6 +55,17 @@ Restart [OMP](https://github.com/can1357/oh-my-pi) inside a Git worktree, then:
 ```
 
 Projects onboard automatically. Use `TYPESAFE_API_KEY` instead of `/login` if preferred. Without credentials or consent, local checks and configured fallback remain active.
+
+## Upgrade
+
+Refresh the marketplace catalog before upgrading the installed plugin:
+
+```bash
+omp plugin marketplace update goulinkh
+omp plugin upgrade omp-semantic-policy@goulinkh
+```
+
+The package, marketplace catalog, and prepared release tag use version `0.1.0` ([`v0.1.0`](https://github.com/goulinkh/omp-semantic-policy/releases/tag/v0.1.0)).
 
 ## Commands
 

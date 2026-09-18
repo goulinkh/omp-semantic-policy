@@ -12,21 +12,22 @@
   },
   "packageManager": "bun@1.4.2",
   "files": [
-    "src"
+    "dist",
+    "src/policy"
   ],
   "exports": {
     ".": {
       "types": "./src/policy/index.ts",
-      "import": "./src/policy/index.ts"
+      "import": "./dist/policy/index.js"
     },
     "./omp": {
       "types": "./src/index.ts",
-      "import": "./src/index.ts"
+      "import": "./dist/index.js"
     }
   },
   "omp": {
     "extensions": [
-      "./src/index.ts"
+      "./dist/index.js"
     ],
     "settings": {
       "showStatus": {
@@ -69,11 +70,11 @@
     }
   },
   "scripts": {
-    "build": "bun build src/index.ts --outdir dist --target bun --external @oh-my-pi/pi-ai --external @oh-my-pi/pi-coding-agent --external @oh-my-pi/pi-tui",
+    "build": "bun scripts/build.ts",
     "check": "bun run format:check && bun run lint && bun run typecheck && bun test && bun run build",
-    "format": "oxfmt --write --no-error-on-unmatched-pattern 'src/**/*.ts' 'testing/**/*.ts' 'docs/assets/policy-flow/**/*.ts'",
-    "format:check": "oxfmt --check --no-error-on-unmatched-pattern 'src/**/*.ts' 'testing/**/*.ts' 'docs/assets/policy-flow/**/*.ts'",
-    "lint": "oxlint src testing docs/assets/policy-flow",
+    "format": "oxfmt --write --no-error-on-unmatched-pattern 'src/**/*.ts' 'scripts/**/*.ts' 'testing/**/*.ts' 'docs/assets/policy-flow/**/*.ts'",
+    "format:check": "oxfmt --check --no-error-on-unmatched-pattern 'src/**/*.ts' 'scripts/**/*.ts' 'testing/**/*.ts' 'docs/assets/policy-flow/**/*.ts'",
+    "lint": "oxlint src scripts testing docs/assets/policy-flow",
     "test": "bun test",
     "test:e2e:provider": "bun testing/e2e/provider-project.ts",
     "tune:policy": "bun testing/e2e/policy-tuning.ts",

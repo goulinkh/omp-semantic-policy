@@ -18,5 +18,5 @@
     "skipLibCheck": true,
     "noEmit": true
   },
-  "include": ["src/**/*.ts", "testing/**/*.ts", "docs/assets/policy-flow/**/*.ts"]
+  "include": ["src/**/*.ts", "scripts/**/*.ts", "testing/**/*.ts", "docs/assets/policy-flow/**/*.ts"]
 }

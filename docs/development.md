@@ -13,11 +13,14 @@ The check command verifies formatting, lint, TypeScript types, tests, and the bu
 
 ## Run a local session
 
-Load the local source for a single [OMP](https://github.com/can1357/oh-my-pi) session:
+Build and link this checkout only for development:
 
 ```bash
-omp -e ./src/index.ts
+bun run build
+omp plugin link .
 ```
+
+Restart OMP after rebuilding. For a one-off session without a persistent link, load the source directly with `omp -e ./src/index.ts`.
 
 ## Live tuning
 
