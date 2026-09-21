@@ -595,8 +595,7 @@ export function registerOmpPolicyRuntime(
     const coverageToolName =
       event.toolName === "write" && event.input.path === "xd://lsp" ? "lsp" : event.toolName;
     const semanticEnabled =
-      !disabledToolCallNames.has(coverageToolName) &&
-      (enabledToolCallNames.size === 0 || enabledToolCallNames.has(coverageToolName));
+      enabledToolCallNames.has(coverageToolName) && !disabledToolCallNames.has(coverageToolName);
     const action = normalizeOmpToolCall(event, context, {
       toolInfo: findToolInfo(pi, toolInfoByName, event.toolName),
       toolOperations: runtimeSettings.toolOperations,

@@ -108,7 +108,7 @@ Shell checks also include bounded recent user text and the preceding assistant p
 
 ### Remote tool coverage
 
-- `enabledToolCalls`: A comma-separated allowlist of exact tool names for remote evaluation. An empty value selects all tool calls.
+- `enabledToolCalls`: A comma-separated allowlist of exact tool names for remote evaluation. An empty value disables remote evaluation for registered tool calls.
 
   Default: `bash,eval,python,write,edit,task,hub,browser,computer,debug`.
 

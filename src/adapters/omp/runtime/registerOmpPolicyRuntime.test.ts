@@ -683,7 +683,7 @@ describe("OMP policy runtime", () => {
     expect(modelRequests.map((request) => request.action.hostAction.name)).toEqual(["write"]);
   });
 
-  test("evaluates classified custom tools and bypasses disabled unknown tools", async () => {
+  test("evaluates enabled classified custom tools and bypasses unenabled custom tools", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "omp-policy-runtime-custom-tools-"));
     temporaryDirectories.push(fixture);
     const projectRoot = join(fixture, "project");
@@ -708,7 +708,7 @@ describe("OMP policy runtime", () => {
       runtimeSettings: {
         showStatus: false,
         showViolationFeedback: false,
-        enabledToolCalls: [],
+        enabledToolCalls: ["launchpad"],
         disabledToolCalls: ["trusted_extension"],
         toolOperations: { launchpad: "read" },
       },
@@ -752,13 +752,13 @@ describe("OMP policy runtime", () => {
           "tool_call",
           {
             type: "tool_call",
-            toolCallId: "covered-unknown",
+            toolCallId: "unconfigured-unknown",
             toolName: "unmapped_extension",
             input: { arbitrary: "input" },
           },
           context,
         ),
-      ).toMatchObject({ block: true });
+      ).toBeUndefined();
 
       expect(modelRequests).toHaveLength(1);
       expect(modelRequests[0]?.action).toMatchObject({
@@ -780,15 +780,64 @@ describe("OMP policy runtime", () => {
     }
   });
 
+  test("bypasses Launchpad operations when no tool calls are enabled", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "omp-policy-runtime-empty-allowlist-"));
+    temporaryDirectories.push(fixture);
+    const projectRoot = join(fixture, "project");
+    await mkdir(join(projectRoot, ".git"), { recursive: true });
+    await writeFile(join(projectRoot, "AGENTS.md"), "Never publish secrets.\n");
+
+    const modelRequests: PolicyModelRequest[] = [];
+    const harness = createExtensionHarness([
+      {
+        name: "launchpad",
+        sourceInfo: { source: "mcp", path: "<mcp:launchpad>" },
+      } as ToolInfo,
+    ]);
+    registerOmpPolicyRuntime(harness.api, {
+      databasePath: join(fixture, "policy.db"),
+      profileInstructionPaths: [],
+      createPolicyModel: () => fixturePolicyModel(modelRequests),
+      runtimeSettings: {
+        showStatus: false,
+        showViolationFeedback: false,
+        enabledToolCalls: [],
+      },
+    });
+    const context = createContext(projectRoot);
+
+    await harness.emit("session_start", { type: "session_start" }, context);
+    try {
+      for (const [toolCallId, input] of [
+        [
+          "search-merge-proposals",
+          {
+            op: "search_merge_proposals",
+            repository: "lp://~goulinkh/launchpad/+git/launchpad",
+            status: ["Needs review"],
+            limit: 50,
+          },
+        ],
+        ["repo-view", { op: "repo_view", repository: "lp://~goulinkh/launchpad/+git/launchpad" }],
+      ] as const) {
+        expect(
+          await harness.emit(
+            "tool_call",
+            { type: "tool_call", toolCallId, toolName: "launchpad", input },
+            context,
+          ),
+        ).toBeUndefined();
+      }
+      expect(modelRequests).toEqual([]);
+    } finally {
+      await harness.emit("session_shutdown", { type: "session_shutdown" }, context);
+    }
+  });
+
   test.each([
     { name: "defaults", enabled: undefined, disabled: [], evaluated: ["write", "bash"] },
     { name: "explicit glob opt-in", enabled: ["glob"], disabled: [], evaluated: ["glob"] },
-    {
-      name: "explicit all-tools opt-in",
-      enabled: [],
-      disabled: [],
-      evaluated: ["glob", "read", "grep", "todo", "ask", "web_search", "write", "bash"],
-    },
+    { name: "empty allowlist", enabled: [], disabled: [], evaluated: [] },
     { name: "disabled precedence", enabled: ["glob"], disabled: ["glob"], evaluated: [] },
   ])(
     "limits semantic requests with $name",
@@ -886,10 +935,10 @@ describe("OMP policy runtime", () => {
       evaluated: ["native-lsp", "routed-lsp"],
     },
     {
-      name: "all-tools opt-in",
+      name: "empty allowlist",
       enabled: [],
       disabled: [],
-      evaluated: ["native-lsp", "routed-lsp", "file-write", "other-device"],
+      evaluated: [],
     },
     {
       name: "LSP disable precedence",
