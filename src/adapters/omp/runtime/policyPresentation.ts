@@ -7,6 +7,7 @@ import {
   SHELL_WORD_PATTERN,
 } from "../../../policy/actions/shellArguments.js";
 import type { PolicyAction, PolicyDecision } from "../../../policy/index.js";
+import type { PolicyOperation } from "../../../policy/actions/types.js";
 import { redactText } from "../../typesafe/redactProviderState.js";
 import { brandPolicyText } from "../policyIdentity.js";
 
@@ -34,6 +35,7 @@ export interface PolicyRuntimeSettings {
   readonly confirmationThreshold: number;
   readonly disabledToolCalls: readonly string[];
   readonly enabledToolCalls: readonly string[];
+  readonly toolOperations: Readonly<Partial<Record<string, PolicyOperation>>>;
 }
 
 export interface PolicyStatusBarController {
@@ -49,7 +51,9 @@ export interface PolicyStatusBarHost {
 
 export async function loadPolicyRuntimeSettings(
   cwd: string,
-  overrides: Partial<PolicyRuntimeSettings> = {},
+  overrides: Omit<Partial<PolicyRuntimeSettings>, "toolOperations"> & {
+    readonly toolOperations?: unknown;
+  } = {},
 ): Promise<PolicyRuntimeSettings> {
   let configured: Record<string, unknown> = {};
   if (
@@ -58,7 +62,8 @@ export async function loadPolicyRuntimeSettings(
     overrides.confirmationDefault === undefined ||
     overrides.confirmationThreshold === undefined ||
     overrides.disabledToolCalls === undefined ||
-    overrides.enabledToolCalls === undefined
+    overrides.enabledToolCalls === undefined ||
+    overrides.toolOperations === undefined
   ) {
     try {
       configured = await getPluginSettings(PLUGIN_NAME, cwd);
@@ -78,6 +83,9 @@ export async function loadPolicyRuntimeSettings(
   const enabledToolCalls = normalizeToolCallNames(
     overrides.enabledToolCalls ?? configured.enabledToolCalls ?? DEFAULT_ENABLED_TOOL_CALLS,
   );
+  const toolOperations = normalizeToolOperations(
+    overrides.toolOperations ?? configured.toolOperations,
+  );
   return {
     showStatus: overrides.showStatus ?? configured.showStatus !== false,
     showViolationFeedback:
@@ -86,6 +94,7 @@ export async function loadPolicyRuntimeSettings(
     confirmationThreshold,
     disabledToolCalls,
     enabledToolCalls,
+    toolOperations,
   };
 }
 
@@ -105,6 +114,50 @@ function normalizeToolCallNames(value: unknown): readonly string[] {
         .filter((item) => item.length > 0),
     ),
   ];
+}
+
+const POLICY_OPERATIONS: Readonly<Partial<Record<PolicyOperation, true>>> = {
+  read: true,
+  write: true,
+  execute: true,
+  delegate: true,
+  network: true,
+  workflow: true,
+  internal: true,
+  unknown: true,
+};
+
+function normalizeToolOperations(
+  value: unknown,
+): Readonly<Partial<Record<string, PolicyOperation>>> {
+  let entries: readonly (readonly [string, unknown])[] = [];
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.startsWith("{")) {
+      try {
+        const parsed: unknown = JSON.parse(trimmed);
+        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+          entries = Object.entries(parsed);
+        }
+      } catch {
+        entries = [];
+      }
+    } else {
+      entries = trimmed
+        .split(",")
+        .map((mapping) => mapping.split("=", 2).map((part) => part.trim()) as [string, string]);
+    }
+  } else if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    entries = Object.entries(value);
+  }
+  return Object.fromEntries(
+    entries.filter(
+      (entry): entry is readonly [string, PolicyOperation] =>
+        entry[0].length > 0 &&
+        typeof entry[1] === "string" &&
+        POLICY_OPERATIONS[entry[1] as PolicyOperation] === true,
+    ),
+  );
 }
 
 /** Move extension statuses into OMP's native status segment instead of a separate footer row. */

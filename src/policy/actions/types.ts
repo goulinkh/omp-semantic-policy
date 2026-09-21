@@ -18,7 +18,16 @@ export interface PolicyActor {
   readonly parentSessionId?: string;
 }
 
-export type PolicyTargetKind = "path" | "command" | "code" | "query" | "agent" | "url" | "tool";
+export type PolicyTargetKind =
+  | "path"
+  | "command"
+  | "code"
+  | "query"
+  | "agent"
+  | "url"
+  | "tool"
+  | "target"
+  | "repository";
 
 export interface PolicyTarget {
   readonly kind: PolicyTargetKind;

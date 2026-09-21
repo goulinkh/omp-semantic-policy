@@ -57,6 +57,11 @@ describe("policy session presentation", () => {
         confirmationThreshold: 0.8,
         disabledToolCalls: ["bash", " write ", "bash"],
         enabledToolCalls: ["write", " read ", "write"],
+        toolOperations: {
+          launchpad: "read",
+          launchpad_write: "execute",
+          read: "execute",
+        },
       }),
     ).toEqual({
       showStatus: false,
@@ -65,6 +70,34 @@ describe("policy session presentation", () => {
       confirmationThreshold: 0.8,
       disabledToolCalls: ["bash", "write"],
       enabledToolCalls: ["write", "read"],
+      toolOperations: {
+        launchpad: "read",
+        launchpad_write: "execute",
+        read: "execute",
+      },
+    });
+  });
+
+  test("normalizes string and JSON extension tool operation mappings", async () => {
+    expect(
+      (
+        await loadPolicyRuntimeSettings("/workspace/project", {
+          toolOperations: "launchpad=read, launchpad_write=execute, unsupported=invalid",
+        })
+      ).toolOperations,
+    ).toEqual({
+      launchpad: "read",
+      launchpad_write: "execute",
+    });
+    expect(
+      (
+        await loadPolicyRuntimeSettings("/workspace/project", {
+          toolOperations: '{"mcp_read":"read","mcp_write":"write"}',
+        })
+      ).toolOperations,
+    ).toEqual({
+      mcp_read: "read",
+      mcp_write: "write",
     });
   });
 

@@ -40,6 +40,7 @@ export interface OmpToolNormalizationContext {
 export interface NormalizeOmpToolCallOptions {
   readonly now?: () => number;
   readonly toolInfo?: ToolInfo | undefined;
+  readonly toolOperations?: Readonly<Partial<Record<string, PolicyOperation>>>;
 }
 
 /** Convert an OMP tool event into the provider-independent policy vocabulary. */
@@ -53,7 +54,7 @@ export function normalizeOmpToolCall(
   const input: Readonly<Record<string, unknown>> = inputValid
     ? (event.input as Readonly<Record<string, unknown>>)
     : {};
-  const intent = selectDispatchIntent(event.toolName, input);
+  const intent = selectDispatchIntent(event.toolName, input, options.toolOperations);
   const targets = extractTargets(intent.tool, intent.input);
   const route = getString(input, "path");
   if (intent.tool !== event.toolName) {
@@ -96,8 +97,17 @@ export function normalizeOmpToolCall(
   };
 }
 
-export function classifyOmpToolOperation(toolName: string): PolicyOperation {
-  return PRECISE_TOOL_OPERATIONS[toolName] ?? DISPATCH_TOOL_OPERATIONS[toolName] ?? "unknown";
+export function classifyOmpToolOperation(
+  toolName: string,
+  toolOperations: Readonly<Partial<Record<string, PolicyOperation>>> = {},
+): PolicyOperation {
+  const configured = Object.hasOwn(toolOperations, toolName) ? toolOperations[toolName] : undefined;
+  return (
+    PRECISE_TOOL_OPERATIONS[toolName] ??
+    DISPATCH_TOOL_OPERATIONS[toolName] ??
+    configured ??
+    "unknown"
+  );
 }
 
 function classifyInterception(
@@ -135,6 +145,13 @@ function extractTargets(
     addStringTarget(targets, "path", getString(input, "new_name"));
   }
   addStringTarget(targets, "path", getString(input, "program"));
+  addStringTarget(targets, "path", getString(input, "directory"));
+  addStringArrayTargets(targets, "path", input.directories);
+  addStringTarget(targets, "target", getString(input, "target"));
+  addStringArrayTargets(targets, "target", input.targets);
+  addStringTarget(targets, "repository", getString(input, "repository"));
+  addStringArrayTargets(targets, "repository", input.repositories);
+  addStringArrayTargets(targets, "url", input.urls);
   if (toolName === "edit" && typeof input.input === "string") {
     for (const match of input.input.matchAll(
       /^\[(.+)#[A-F0-9]{4}\]$|^\*\*\* (?:Update|Add|Delete) File: (.+)$|^\*\*\* Move to: (.+)$|^MV (?:"([^"]+)"|(.+))$/gmu,
@@ -229,6 +246,7 @@ interface DispatchIntent {
 function selectDispatchIntent(
   hostTool: string,
   hostInput: Readonly<Record<string, unknown>>,
+  toolOperations: Readonly<Partial<Record<string, PolicyOperation>>> = {},
 ): DispatchIntent {
   let tool = hostTool;
   let input = hostInput;
@@ -305,8 +323,17 @@ function selectDispatchIntent(
   function requireString(key: string): void {
     if (getString(input, key) === undefined) complete = false;
   }
-  let operation = classifyOmpToolOperation(tool);
+  const configuredOperation =
+    Object.hasOwn(toolOperations, tool) && toolOperations[tool] !== undefined;
+  let operation = classifyOmpToolOperation(tool, toolOperations);
   select(["cwd"]);
+  if (
+    configuredOperation &&
+    PRECISE_TOOL_OPERATIONS[tool] === undefined &&
+    DISPATCH_TOOL_OPERATIONS[tool] === undefined
+  ) {
+    details.input = bounded(input);
+  }
   switch (tool) {
     case "task": {
       select(["context"]);
@@ -685,8 +712,8 @@ function selectDispatchIntent(
     case "todo":
       break;
     default:
-      // Unknown dispatch schemas cannot be represented faithfully by guessing fields.
-      complete = false;
+      // Configured extension schemas are represented by their complete bounded input.
+      if (!configuredOperation) complete = false;
   }
   return { tool, input, operation, details, complete };
 }

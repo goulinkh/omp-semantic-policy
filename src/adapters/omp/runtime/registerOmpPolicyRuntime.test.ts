@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext, ToolInfo } from "@oh-my-pi/pi-coding-agent";
 import * as fs from "node:fs/promises";
 import { mkdtemp, mkdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -681,6 +681,103 @@ describe("OMP policy runtime", () => {
     expect(outsideAllowlistResult).toBeUndefined();
     expect(enabledResult).toBeUndefined();
     expect(modelRequests.map((request) => request.action.hostAction.name)).toEqual(["write"]);
+  });
+
+  test("evaluates classified custom tools and bypasses disabled unknown tools", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "omp-policy-runtime-custom-tools-"));
+    temporaryDirectories.push(fixture);
+    const projectRoot = join(fixture, "project");
+    const databasePath = join(fixture, "policy.db");
+    await mkdir(join(projectRoot, ".git"), { recursive: true });
+    await writeFile(join(projectRoot, "AGENTS.md"), "Never publish secrets.\n");
+    const repository = await createPolicyRepository(databasePath);
+    repository.setRemoteConsent(true);
+    repository.close();
+
+    const modelRequests: PolicyModelRequest[] = [];
+    const harness = createExtensionHarness([
+      {
+        name: "launchpad",
+        sourceInfo: { source: "mcp", path: "<mcp:launchpad>" },
+      } as ToolInfo,
+    ]);
+    registerOmpPolicyRuntime(harness.api, {
+      databasePath,
+      profileInstructionPaths: [],
+      createPolicyModel: () => fixturePolicyModel(modelRequests),
+      runtimeSettings: {
+        showStatus: false,
+        showViolationFeedback: false,
+        enabledToolCalls: [],
+        disabledToolCalls: ["trusted_extension"],
+        toolOperations: { launchpad: "read" },
+      },
+    });
+    const context = createContext(projectRoot);
+    const input = {
+      op: "search_merge_proposals",
+      repository: "launchpad",
+      target: "merge-proposal",
+      limit: 1,
+    };
+
+    await harness.emit("session_start", { type: "session_start" }, context);
+    try {
+      expect(
+        await harness.emit(
+          "tool_call",
+          {
+            type: "tool_call",
+            toolCallId: "classified",
+            toolName: "launchpad",
+            input,
+          },
+          context,
+        ),
+      ).toMatchObject({ block: true });
+      expect(
+        await harness.emit(
+          "tool_call",
+          {
+            type: "tool_call",
+            toolCallId: "disabled-unknown",
+            toolName: "trusted_extension",
+            input: { arbitrary: "input" },
+          },
+          context,
+        ),
+      ).toBeUndefined();
+      expect(
+        await harness.emit(
+          "tool_call",
+          {
+            type: "tool_call",
+            toolCallId: "covered-unknown",
+            toolName: "unmapped_extension",
+            input: { arbitrary: "input" },
+          },
+          context,
+        ),
+      ).toMatchObject({ block: true });
+
+      expect(modelRequests).toHaveLength(1);
+      expect(modelRequests[0]?.action).toMatchObject({
+        operation: "read",
+        complete: true,
+        interception: "dispatch-only",
+        details: { input },
+        targets: [
+          { kind: "target", value: "merge-proposal" },
+          { kind: "repository", value: "launchpad" },
+        ],
+        hostAction: {
+          name: "launchpad",
+          source: { kind: "mcp", path: "<mcp:launchpad>" },
+        },
+      });
+    } finally {
+      await harness.emit("session_shutdown", { type: "session_shutdown" }, context);
+    }
   });
 
   test.each([
@@ -1492,7 +1589,7 @@ interface ExtensionHarness {
   runCommand(name: string, args: string, context: ExtensionContext): Promise<void>;
 }
 
-function createExtensionHarness(): ExtensionHarness {
+function createExtensionHarness(tools: readonly ToolInfo[] = []): ExtensionHarness {
   const handlers = new Map<string, RuntimeHandler[]>();
   const commands = new Map<string, RuntimeCommandHandler>();
   const api = {
@@ -1509,7 +1606,7 @@ function createExtensionHarness(): ExtensionHarness {
       }
     },
     getAllTools() {
-      return [];
+      return tools;
     },
     on(event: string, handler: unknown) {
       if (typeof handler === "function") {

@@ -212,6 +212,7 @@ export function registerOmpPolicyRuntime(
     confirmationDefault: "approve",
     disabledToolCalls: [],
     enabledToolCalls: DEFAULT_ENABLED_TOOL_CALLS,
+    toolOperations: {},
     confirmationThreshold: 1,
   };
   let disabledToolCallNames = new Set<string>();
@@ -596,6 +597,7 @@ export function registerOmpPolicyRuntime(
       (enabledToolCallNames.size === 0 || enabledToolCallNames.has(coverageToolName));
     const action = normalizeOmpToolCall(event, context, {
       toolInfo: findToolInfo(pi, toolInfoByName, event.toolName),
+      toolOperations: runtimeSettings.toolOperations,
     });
     const actionAuthorization =
       event.toolName === "bash" && authorization !== undefined && requestContext !== undefined

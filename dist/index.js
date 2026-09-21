@@ -3115,7 +3115,7 @@ var DEFAULT_ENABLED_TOOL_CALLS = [
 ];
 async function loadPolicyRuntimeSettings(cwd, overrides = {}) {
   let configured = {};
-  if (overrides.showStatus === undefined || overrides.showViolationFeedback === undefined || overrides.confirmationDefault === undefined || overrides.confirmationThreshold === undefined || overrides.disabledToolCalls === undefined || overrides.enabledToolCalls === undefined) {
+  if (overrides.showStatus === undefined || overrides.showViolationFeedback === undefined || overrides.confirmationDefault === undefined || overrides.confirmationThreshold === undefined || overrides.disabledToolCalls === undefined || overrides.enabledToolCalls === undefined || overrides.toolOperations === undefined) {
     try {
       configured = await getPluginSettings(PLUGIN_NAME, cwd);
     } catch {
@@ -3126,13 +3126,15 @@ async function loadPolicyRuntimeSettings(cwd, overrides = {}) {
   const confirmationThreshold = normalizeConfirmationThreshold(overrides.confirmationThreshold ?? configured.confirmationThreshold);
   const disabledToolCalls = normalizeToolCallNames(overrides.disabledToolCalls ?? configured.disabledToolCalls);
   const enabledToolCalls = normalizeToolCallNames(overrides.enabledToolCalls ?? configured.enabledToolCalls ?? DEFAULT_ENABLED_TOOL_CALLS);
+  const toolOperations = normalizeToolOperations(overrides.toolOperations ?? configured.toolOperations);
   return {
     showStatus: overrides.showStatus ?? configured.showStatus !== false,
     showViolationFeedback: overrides.showViolationFeedback ?? configured.showViolationFeedback !== false,
     confirmationDefault: confirmationDefault === "approve" ? "approve" : "deny",
     confirmationThreshold,
     disabledToolCalls,
-    enabledToolCalls
+    enabledToolCalls,
+    toolOperations
   };
 }
 function normalizeConfirmationThreshold(value) {
@@ -3143,6 +3145,37 @@ function normalizeToolCallNames(value) {
   return [
     ...new Set(items.filter((item) => typeof item === "string").map((item) => item.trim()).filter((item) => item.length > 0))
   ];
+}
+var POLICY_OPERATIONS = {
+  read: true,
+  write: true,
+  execute: true,
+  delegate: true,
+  network: true,
+  workflow: true,
+  internal: true,
+  unknown: true
+};
+function normalizeToolOperations(value) {
+  let entries = [];
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    if (trimmed.startsWith("{")) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
+          entries = Object.entries(parsed);
+        }
+      } catch {
+        entries = [];
+      }
+    } else {
+      entries = trimmed.split(",").map((mapping) => mapping.split("=", 2).map((part) => part.trim()));
+    }
+  } else if (typeof value === "object" && value !== null && !Array.isArray(value)) {
+    entries = Object.entries(value);
+  }
+  return Object.fromEntries(entries.filter((entry) => entry[0].length > 0 && typeof entry[1] === "string" && POLICY_OPERATIONS[entry[1]] === true));
 }
 function createPolicyStatusBarController(host = createOmpStatusBarHost()) {
   let configured = false;
@@ -3350,7 +3383,7 @@ var DISPATCH_TOOL_OPERATIONS = {
 function normalizeOmpToolCall(event, context, options = {}) {
   const inputValid = typeof event.input === "object" && event.input !== null && !Array.isArray(event.input);
   const input = inputValid ? event.input : {};
-  const intent = selectDispatchIntent(event.toolName, input);
+  const intent = selectDispatchIntent(event.toolName, input, options.toolOperations);
   const targets = extractTargets(intent.tool, intent.input);
   const route = getString(input, "path");
   if (intent.tool !== event.toolName) {
@@ -3385,8 +3418,9 @@ function normalizeOmpToolCall(event, context, options = {}) {
     }
   };
 }
-function classifyOmpToolOperation(toolName) {
-  return PRECISE_TOOL_OPERATIONS[toolName] ?? DISPATCH_TOOL_OPERATIONS[toolName] ?? "unknown";
+function classifyOmpToolOperation(toolName, toolOperations = {}) {
+  const configured = Object.hasOwn(toolOperations, toolName) ? toolOperations[toolName] : undefined;
+  return PRECISE_TOOL_OPERATIONS[toolName] ?? DISPATCH_TOOL_OPERATIONS[toolName] ?? configured ?? "unknown";
 }
 function classifyInterception(toolName, input, toolInfo) {
   if (DISPATCH_TOOL_OPERATIONS[toolName] !== undefined) {
@@ -3411,6 +3445,13 @@ function extractTargets(toolName, input) {
     addStringTarget(targets, "path", getString(input, "new_name"));
   }
   addStringTarget(targets, "path", getString(input, "program"));
+  addStringTarget(targets, "path", getString(input, "directory"));
+  addStringArrayTargets(targets, "path", input.directories);
+  addStringTarget(targets, "target", getString(input, "target"));
+  addStringArrayTargets(targets, "target", input.targets);
+  addStringTarget(targets, "repository", getString(input, "repository"));
+  addStringArrayTargets(targets, "repository", input.repositories);
+  addStringArrayTargets(targets, "url", input.urls);
   if (toolName === "edit" && typeof input.input === "string") {
     for (const match of input.input.matchAll(/^\[(.+)#[A-F0-9]{4}\]$|^\*\*\* (?:Update|Add|Delete) File: (.+)$|^\*\*\* Move to: (.+)$|^MV (?:"([^"]+)"|(.+))$/gmu)) {
       addStringTarget(targets, "path", match[1] ?? match[2] ?? match[3] ?? match[4] ?? match[5]);
@@ -3472,7 +3513,7 @@ function addStringTarget(targets, kind, value) {
 var MAX_INTENT_CHARACTERS = 32000;
 var MAX_INTENT_ITEMS = 64;
 var MAX_INTENT_DEPTH = 4;
-function selectDispatchIntent(hostTool, hostInput) {
+function selectDispatchIntent(hostTool, hostInput, toolOperations = {}) {
   let tool = hostTool;
   let input = hostInput;
   let complete = true;
@@ -3550,8 +3591,12 @@ function selectDispatchIntent(hostTool, hostInput) {
     if (getString(input, key) === undefined)
       complete = false;
   }
-  let operation = classifyOmpToolOperation(tool);
+  const configuredOperation = Object.hasOwn(toolOperations, tool) && toolOperations[tool] !== undefined;
+  let operation = classifyOmpToolOperation(tool, toolOperations);
   select(["cwd"]);
+  if (configuredOperation && PRECISE_TOOL_OPERATIONS[tool] === undefined && DISPATCH_TOOL_OPERATIONS[tool] === undefined) {
+    details.input = bounded(input);
+  }
   switch (tool) {
     case "task": {
       select(["context"]);
@@ -3854,7 +3899,8 @@ function selectDispatchIntent(hostTool, hostInput) {
     case "todo":
       break;
     default:
-      complete = false;
+      if (!configuredOperation)
+        complete = false;
   }
   return { tool, input, operation, details, complete };
 }
@@ -4609,6 +4655,22 @@ async function evaluateSnapshotPolicy(options) {
       });
     }
   }
+  if (options.semanticEnabled === false) {
+    return {
+      effect: "allow",
+      evidence: {
+        evaluatorId: "compiled-policy-coverage",
+        source: "deterministic",
+        ruleIds: [],
+        applicableRuleIds,
+        diagnostics: {
+          path: "coverage-bypass",
+          confirmation: { resolution: "not-required" },
+          enforcedEffect: "allow"
+        }
+      }
+    };
+  }
   if (!action.complete) {
     return {
       effect: "deny",
@@ -4626,7 +4688,7 @@ async function evaluateSnapshotPolicy(options) {
       }
     };
   }
-  if (options.semanticEnabled === false || snapshot !== undefined && rules.length === 0) {
+  if (snapshot !== undefined && rules.length === 0) {
     return {
       effect: "allow",
       evidence: {
@@ -4635,7 +4697,7 @@ async function evaluateSnapshotPolicy(options) {
         ruleIds: [],
         applicableRuleIds,
         diagnostics: {
-          path: options.semanticEnabled === false ? "coverage-bypass" : "no-applicable-rules",
+          path: "no-applicable-rules",
           confirmation: { resolution: "not-required" },
           enforcedEffect: "allow"
         }
@@ -5157,6 +5219,7 @@ function registerOmpPolicyRuntime(pi, options = {}) {
     confirmationDefault: "approve",
     disabledToolCalls: [],
     enabledToolCalls: DEFAULT_ENABLED_TOOL_CALLS,
+    toolOperations: {},
     confirmationThreshold: 1
   };
   let disabledToolCallNames = new Set;
@@ -5438,7 +5501,8 @@ function registerOmpPolicyRuntime(pi, options = {}) {
     const coverageToolName = event.toolName === "write" && event.input.path === "xd://lsp" ? "lsp" : event.toolName;
     const semanticEnabled = !disabledToolCallNames.has(coverageToolName) && (enabledToolCallNames.size === 0 || enabledToolCallNames.has(coverageToolName));
     const action = normalizeOmpToolCall(event, context, {
-      toolInfo: findToolInfo(pi, toolInfoByName, event.toolName)
+      toolInfo: findToolInfo(pi, toolInfoByName, event.toolName),
+      toolOperations: runtimeSettings.toolOperations
     });
     const actionAuthorization = event.toolName === "bash" && authorization !== undefined && requestContext !== undefined ? { ...authorization, requestContext } : authorization;
     const coordinator = coordinatorFor(context);

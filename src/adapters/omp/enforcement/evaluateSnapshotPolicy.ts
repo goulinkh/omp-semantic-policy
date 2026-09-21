@@ -39,7 +39,7 @@ const fallbackGate = createPolicyGate({
   fallbackEvaluator: createConservativeFallback(),
 });
 
-/** Local denials precede even excluded tools; semantic uncertainty retains confirmation guards. */
+/** Local denials precede exclusions; completeness applies only to semantically covered actions. */
 export async function evaluateSnapshotPolicy(
   options: EvaluateSnapshotPolicyOptions,
 ): Promise<PolicyDecision> {
@@ -63,6 +63,22 @@ export async function evaluateSnapshotPolicy(
       );
     }
   }
+  if (options.semanticEnabled === false) {
+    return {
+      effect: "allow",
+      evidence: {
+        evaluatorId: "compiled-policy-coverage",
+        source: "deterministic",
+        ruleIds: [],
+        applicableRuleIds,
+        diagnostics: {
+          path: "coverage-bypass",
+          confirmation: { resolution: "not-required" },
+          enforcedEffect: "allow",
+        },
+      },
+    };
+  }
   if (!action.complete) {
     return {
       effect: "deny",
@@ -80,7 +96,7 @@ export async function evaluateSnapshotPolicy(
       },
     };
   }
-  if (options.semanticEnabled === false || (snapshot !== undefined && rules.length === 0)) {
+  if (snapshot !== undefined && rules.length === 0) {
     return {
       effect: "allow",
       evidence: {
@@ -89,7 +105,7 @@ export async function evaluateSnapshotPolicy(
         ruleIds: [],
         applicableRuleIds,
         diagnostics: {
-          path: options.semanticEnabled === false ? "coverage-bypass" : "no-applicable-rules",
+          path: "no-applicable-rules",
           confirmation: { resolution: "not-required" },
           enforcedEffect: "allow",
         },

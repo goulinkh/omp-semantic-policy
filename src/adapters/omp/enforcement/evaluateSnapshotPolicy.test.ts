@@ -295,10 +295,10 @@ describe("evaluateSnapshotPolicy", () => {
     expect(providerResolved).toBe(false);
   });
 
-  test("records excluded-tool coverage without resolving a remote provider", async () => {
+  test("bypasses completeness for tools excluded from semantic coverage", async () => {
     let providerResolved = false;
     const decision = await evaluateSnapshotPolicy({
-      action: createTestPolicyAction("read"),
+      action: { ...createTestPolicyAction("unknown"), complete: false },
       snapshot,
       context: { headless: false },
       semanticEnabled: false,

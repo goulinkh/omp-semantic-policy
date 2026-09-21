@@ -111,9 +111,11 @@ Shell checks also include bounded recent user text and the preceding assistant p
 
   Default: `bash,eval,python,write,edit,task,hub,browser,computer,debug`.
 
-- `disabledToolCalls` (default: empty): A comma-separated list of tool names to exclude from remote evaluation. Takes precedence over `enabledToolCalls`.
+- `disabledToolCalls` (default: empty): A comma-separated list of exact tool names to exclude from semantic evaluation. Takes precedence over `enabledToolCalls`; excluded unknown tools are not rejected for lacking a built-in adapter.
 
-These filters only affect remote tool evaluation. Local protections, incomplete-intent checks, direct shell and Python gates, and headless workflow gates still apply.
+- `toolOperations` (default: empty): Classify custom or MCP tools with comma-separated `name=operation` entries, for example `launchpad=read,launchpad_write=execute`. Supported operations are `read`, `write`, `execute`, `delegate`, `network`, `workflow`, `internal`, and `unknown`. JSON object syntax is also accepted. Built-in classifications cannot be overridden.
+
+Coverage filters do not bypass grounded local path protections. Completeness checks apply to semantically covered calls; an enabled but unclassified custom tool fails closed. Direct shell, Python, and headless workflow gates remain independent.
 
 ## Coverage limits
 

@@ -28,6 +28,8 @@ host event
 
 Deterministic grounded path protections run before remote-coverage filters. Semantic evaluation handles the remaining applicable instructions, ambiguity, and headless workflow checks; it cannot weaken a local denial. Filtered calls skip TypeSafe, not all policy enforcement. No applicable rules can produce a local allow. Incomplete action evidence is unassessed and blocking even with a permissive confirmation default; other unavailable evaluation reaches the configured conservative fallback without becoming a violation claim. The fallback records whether semantic evaluation was disabled, login was required, credential resolution failed, evaluation failed, or the provider returned another unavailable result. If the semantic model was not needed, status reports it as not checked rather than unavailable.
 
+The incomplete-action guard is part of semantic coverage. A filtered call still undergoes grounded local checks, then receives a coverage bypass; this lets disabled or default-excluded custom tools execute without pretending that their unknown schema was assessed. When all-tool coverage or an exact allowlist entry includes an unclassified custom tool, the incomplete guard fails closed.
+
 ## Normalized action
 
 The implemented `PolicyAction` records:
@@ -39,6 +41,8 @@ The implemented `PolicyAction` records:
 - host operation, structured input, source metadata, normalized action details, and completeness;
 - normalized targets, including grounded routed-operation and delegated-dispatch evidence when available;
 - interception capability: precise, dispatch-only, advisory, or absent.
+
+Configured `toolOperations` entries classify exact custom or MCP tool names without changing built-in adapters. Their complete bounded input is retained under `details.input`; generic `path`, `directory`, `url`, `target`, and `repository` fields become normalized targets. These actions remain dispatch-only because the host hook gates dispatch but cannot contain nested effects.
 
 The evaluation context separately carries headless state and optional authorization and snapshot references. Ordinary `before_agent_start` text starts request-scoped with `explicit: false`, not blanket approval of implementation. A whole affirmative literal Run/Execute request may be host-bound to the identical complete bash command; environment overrides, another working directory, and extra command segments do not inherit that authorization. Matching uses original input, not redacted summaries. Direct user actions and host-validated one-use maintenance grants are also exact-action scoped and bound to the full action digest. Authorization does not override an absolute applicable prohibition.
 
@@ -166,6 +170,8 @@ Local deterministic rules remain available without the remote provider. Defaults
 
 Checked unknown tools follow the same configured behavior. Uncertainty and provider unavailability are not compliance judgments. The default deliberately accepts confirmation requests, including ungrounded model denials and unavailable-evaluator fallbacks in interactive and headless sessions. `confirmationDefault: "deny"` opts into fail-closed automatic resolution. Neither setting overrides grounded policy denials or incomplete-action guards. Existing explicit settings are preserved. Standalone `evaluateSnapshotPolicy` calls that omit confirmation settings also default to automatic acceptance; the OMP runtime passes its settings. Missing credentials remain identified as `login required`, with recovery through `/login typesafe-ai` or `TYPESAFE_API_KEY`.
 
+For unknown registered tools, coverage determines whether incompleteness is enforced: excluded names receive a coverage bypass after local checks, while enabled unclassified names fail closed. An explicit `toolOperations` classification supplies a complete bounded representation for semantic assessment.
+
 Credential redaction preserves quoted empty fields and delimiters while withholding nonempty values. A redacted value is not evidence of emptiness or proof of a live credential. Policy questions assess the proposed action, not quoted examples, and claims of testing or an empty environment do not override applicable prohibitions. This remains semantic enforcement, not a comprehensive shell parser or a guarantee against model misclassification.
 
 Scoped maintenance is a separate one-use authorization path, not a fail-open policy setting. `/policy maintenance` shows the last eligible assessed-uncertain project-local install/link or plugin-lockfile proposal; `/policy maintenance approve <action-id>` binds one identical retry to its full input digest, session, project, and snapshot. `/policy maintenance revoke` clears it. Only the exact supported install/link commands and project-local `plugin/omp-plugins.lock.json` object writes qualify. Local or semantic denials, incomplete intent, and unavailable evaluation cannot be approved through this flow. The retry still undergoes evaluation; there is no offline hard-policy bypass. See [Policy Tuning](tuning.md#scoped-maintenance-not-a-policy-bypass) for the operator procedure.
@@ -187,6 +193,8 @@ Tool denials return action-bound error text through OMP's `tool_call` result, no
 Registered tool-call remote coverage defaults to `bash,eval,python,write,edit,task,hub,browser,computer,debug`. Routine inspection and bookkeeping (`glob`, `lsp`, `read`, `grep`, `todo`, `ask`, and `web_search`) skip semantic evaluation unless explicitly enabled. Custom and MCP tool names also require explicit inclusion. Grounded local read/write path prohibitions run even for filtered calls; this does not provide semantic coverage for arbitrary excluded-tool behavior. In particular, excluded LSP operations may mutate sources beyond locally represented targets.
 
 `enabledToolCalls` is a comma-separated exact-name remote-evaluation allowlist; add `glob` to the list to enable its semantic checks. An explicitly empty value evaluates every registered tool call remotely when needed. `disabledToolCalls` takes precedence when a name appears in both settings, without disabling grounded local path checks. Existing explicit settings, including an empty all-tools allowlist, are preserved. These settings affect registered `tool_call` events only; direct `!` shell and `$` Python gates and headless workflow gates remain independently enforced.
+
+`toolOperations` accepts exact `name=operation` mappings (or a JSON object) for custom and MCP tools. Classifications may be `read`, `write`, `execute`, `delegate`, `network`, `workflow`, `internal`, or `unknown`; built-in classifications take precedence. Covered unclassified names remain incomplete and blocking.
 
 Native `lsp` and `write` to the exact device path `xd://lsp` share the `lsp` coverage setting. Routed calls retain their actual `write` host provenance, but enabling or disabling `write` does not change LSP coverage. Ordinary file writes and other device paths still follow `write` coverage.
 

@@ -65,7 +65,12 @@
       "disabledToolCalls": {
         "type": "string",
         "default": "",
-        "description": "Comma-separated exact OMP tool names that skip remote semantic evaluation, for example bash. Local protections remain active. Empty keeps all current remote enforcement defaults."
+        "description": "Comma-separated exact OMP tool names that skip semantic evaluation, including completeness checks. Grounded local path protections remain active. Empty keeps all current coverage defaults."
+      },
+      "toolOperations": {
+        "type": "string",
+        "default": "",
+        "description": "Comma-separated exact tool classifications such as launchpad=read,launchpad_write=execute. Supported operations: read, write, execute, delegate, network, workflow, internal, and unknown. JSON object syntax is also accepted."
       }
     }
   },

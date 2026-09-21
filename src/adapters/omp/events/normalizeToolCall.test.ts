@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import type { ToolCallEvent } from "@oh-my-pi/pi-coding-agent";
+import type { ToolCallEvent, ToolInfo } from "@oh-my-pi/pi-coding-agent";
 import { normalizeOmpToolCall, type OmpToolNormalizationContext } from "./normalizeToolCall.js";
 
 const context = {
@@ -77,6 +77,68 @@ describe("normalizeOmpToolCall", () => {
     expect(action.operation).toBe("unknown");
     expect(action.interception).toBe("dispatch-only");
     expect(action.targets).toEqual([{ kind: "tool", value: "third_party_mutation" }]);
+    expect(action.complete).toBe(false);
+  });
+
+  it("classifies extension and MCP tools from complete bounded input", () => {
+    const input = {
+      path: "src/index.ts",
+      directory: "src",
+      url: "https://example.invalid/proposal",
+      target: "merge-proposal",
+      repository: "launchpad",
+      payload: { status: "ready" },
+    };
+    for (const source of ["extension", "mcp"] as const) {
+      for (const operation of ["read", "write", "execute", "unknown"] as const) {
+        const toolName = `${source}_${operation}`;
+        const action = normalizeOmpToolCall(
+          {
+            type: "tool_call",
+            toolCallId: toolName,
+            toolName,
+            input,
+          },
+          context,
+          {
+            toolOperations: { [toolName]: operation },
+            toolInfo: {
+              sourceInfo: { source, path: `<${source}:${toolName}>` },
+            } as ToolInfo,
+          },
+        );
+
+        expect(action.operation).toBe(operation);
+        expect(action.complete).toBe(true);
+        expect(action.interception).toBe("dispatch-only");
+        expect(action.details.input).toEqual(input);
+        expect(action.targets).toContainEqual({ kind: "path", value: "src/index.ts" });
+        expect(action.targets).toContainEqual({ kind: "path", value: "src" });
+        expect(action.targets).toContainEqual({
+          kind: "url",
+          value: "https://example.invalid/proposal",
+        });
+        expect(action.targets).toContainEqual({ kind: "target", value: "merge-proposal" });
+        expect(action.targets).toContainEqual({ kind: "repository", value: "launchpad" });
+        expect(action.hostAction.source).toEqual({
+          kind: source,
+          path: `<${source}:${toolName}>`,
+        });
+      }
+    }
+
+    const builtIn = normalizeOmpToolCall(
+      {
+        type: "tool_call",
+        toolCallId: "built-in-read",
+        toolName: "read",
+        input: { path: "src/index.ts" },
+      },
+      context,
+      { toolOperations: { read: "execute" } },
+    );
+    expect(builtIn.operation).toBe("read");
+    expect(builtIn.complete).toBe(true);
   });
 
   it("exposes the protected file of a routed LSP request without claiming precise interception", () => {
