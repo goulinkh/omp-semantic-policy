@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { lstat, readFile, readdir, realpath } from "node:fs/promises";
-import { dirname, join, relative, resolve, sep } from "node:path";
+import { dirname, extname, join, relative, resolve, sep } from "node:path";
 import type { InstructionSource } from "../../../policy/index.js";
 import { hasGitMarker } from "./findGitProjectRoot.js";
 
@@ -17,6 +17,17 @@ const IGNORED_DIRECTORIES: Readonly<Record<string, true>> = {
   node_modules: true,
   target: true,
   vendor: true,
+};
+
+const LINKED_DIRECTORY_FILE_EXTENSIONS: Readonly<Record<string, true>> = {
+  ".adoc": true,
+  ".md": true,
+  ".markdown": true,
+  ".mdx": true,
+  ".prompt": true,
+  ".rst": true,
+  ".rules": true,
+  ".txt": true,
 };
 
 /** Discover project instructions while excluding ancestors and nested repositories. */
@@ -60,6 +71,34 @@ export async function discoverProfileInstructionSources(
   }
 
   return sources;
+}
+
+/** Load explicitly linked files or text-document directories as project-wide policy. */
+export async function discoverLinkedInstructionSources(
+  projectRoot: string,
+  paths: readonly string[],
+): Promise<readonly InstructionSource[]> {
+  const canonicalProjectRoot = await realpath(projectRoot);
+  const sources: InstructionSource[] = [];
+  const seenFiles = new Set<string>();
+
+  for (const configuredPath of paths) {
+    try {
+      const canonicalPath = await realpath(configuredPath);
+      const stats = await lstat(canonicalPath);
+      if (stats.isFile()) {
+        await loadLinkedFile(canonicalProjectRoot, canonicalPath, sources, seenFiles);
+      } else if (stats.isDirectory()) {
+        await walkLinkedDirectory(canonicalProjectRoot, canonicalPath, sources, seenFiles);
+      }
+    } catch (error) {
+      if (!isMissingPathError(error)) {
+        throw error;
+      }
+    }
+  }
+
+  return sources.sort((left, right) => left.path.localeCompare(right.path));
 }
 
 async function walkProject(
@@ -107,6 +146,57 @@ async function walkProject(
       precedence: scopeRoot === projectRoot ? 100 : 200 + depth,
     });
   }
+}
+async function walkLinkedDirectory(
+  projectRoot: string,
+  directory: string,
+  sources: InstructionSource[],
+  seenFiles: Set<string>,
+): Promise<void> {
+  const entries = await readdir(directory, { withFileTypes: true });
+  entries.sort((left, right) => left.name.localeCompare(right.name));
+
+  for (const entry of entries) {
+    const entryPath = join(directory, entry.name);
+    if (entry.isSymbolicLink()) {
+      continue;
+    }
+    if (entry.isDirectory()) {
+      if (IGNORED_DIRECTORIES[entry.name] !== true) {
+        await walkLinkedDirectory(projectRoot, entryPath, sources, seenFiles);
+      }
+      continue;
+    }
+    if (
+      entry.isFile() &&
+      LINKED_DIRECTORY_FILE_EXTENSIONS[extname(entry.name).toLowerCase()] === true
+    ) {
+      await loadLinkedFile(projectRoot, entryPath, sources, seenFiles);
+    }
+  }
+}
+
+async function loadLinkedFile(
+  projectRoot: string,
+  path: string,
+  sources: InstructionSource[],
+  seenFiles: Set<string>,
+): Promise<void> {
+  const canonicalPath = await realpath(path);
+  if (seenFiles.has(canonicalPath)) {
+    return;
+  }
+  seenFiles.add(canonicalPath);
+  const content = await readFile(canonicalPath, "utf8");
+  sources.push({
+    id: `linked:${canonicalPath}`,
+    kind: "project",
+    path: canonicalPath,
+    scopeRoot: projectRoot,
+    content,
+    contentDigest: digestText(content),
+    precedence: 100,
+  });
 }
 
 export function digestText(content: string): string {

@@ -103,12 +103,14 @@ Supplemental standards are discovered without repository-specific path conventio
 
 The resulting files are loaded locally as project-wide sources with their own provenance. Runtime excerpts use synthetic provenance and never claim a filesystem path. Selection is cached by grounded input, but selected files are reread before compilation. If no model or credential is available, inference fails, or output is invalid, onboarding continues with deterministic profile and `AGENTS.md`/`CLAUDE.md` discovery.
 
+`/policy link @<file-or-directory>` is the explicit exception to in-root discovery. It canonicalizes and persists a source path against the real Git project identity. A linked file, or supported text documents recursively found in a linked directory, becomes project-wide policy. Onboarding rereads these sources in the current and future sessions so content changes produce a new snapshot; missing persisted paths contribute no source until they return.
+
 No policy data may be keyed only by the current directory string. Symlink resolution and worktree identity are required to prevent duplicate or cross-project state.
 
 ## Storage
 
 - Credentials: OMP `AuthStorage`, with `TYPESAFE_API_KEY` as the environment fallback.
-- Project state, immutable snapshots, consent, and redacted audits: profile-scoped `policy.db` under `getAgentDir()`.
+- Project state, linked source paths, immutable snapshots, consent, and redacted audits: profile-scoped `policy.db` under `getAgentDir()`.
 - Session entries: unsuitable for durable project state.
 - Policy state does not add private tables to OMP's `agent.db`.
 

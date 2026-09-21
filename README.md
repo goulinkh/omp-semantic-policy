@@ -72,6 +72,7 @@ The package, marketplace catalog, and prepared release tag use version `0.1.0` (
 ### Refresh and maintenance
 
 - `/policy onboard`: Refresh the project's policy snapshot.
+- `/policy link @<file-or-directory>`: Add a persistent project-wide policy source. Relative paths resolve from the project working directory; linked directories recursively load `.adoc`, `.md`, `.markdown`, `.mdx`, `.prompt`, `.rst`, `.rules`, and `.txt` files. The canonical link is stored for the current Git project and reloaded in future sessions.
 - `/policy maintenance`: Review an uncertain maintenance proposal.
 - `/policy maintenance approve <action-id>`: Approve one exact maintenance retry.
 - `/policy maintenance revoke`: Clear the maintenance approval.

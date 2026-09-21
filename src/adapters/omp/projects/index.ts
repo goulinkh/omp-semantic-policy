@@ -1,6 +1,7 @@
 export {
   digestText,
   discoverProfileInstructionSources,
+  discoverLinkedInstructionSources,
   discoverProjectInstructionSources,
   isPathWithin,
 } from "./discoverInstructionSources.js";

@@ -965,6 +965,74 @@ describe("OMP policy runtime", () => {
     },
   );
 
+  test("links external policy sources and reloads them in later sessions", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "omp-policy-runtime-linked-"));
+    temporaryDirectories.push(fixture);
+    const projectRoot = join(fixture, "workspace", "project");
+    const standardsRoot = join(fixture, "code-standards");
+    const databasePath = join(fixture, "profile", "policy.db");
+    await mkdir(join(projectRoot, ".git"), { recursive: true });
+    await mkdir(join(standardsRoot, "nested"), { recursive: true });
+    await writeFile(join(projectRoot, "AGENTS.md"), "Always preserve public APIs.\n");
+    await writeFile(join(standardsRoot, "typescript.md"), "Never use implicit any.\n");
+    await writeFile(join(standardsRoot, "nested", "testing.md"), "Always test behavior.\n");
+    await writeFile(join(standardsRoot, "metadata.json"), '{"not":"policy"}\n');
+    const seedRepository = await createPolicyRepository(databasePath);
+    seedRepository.setRemoteConsent(false);
+    seedRepository.close();
+
+    const firstHarness = createExtensionHarness();
+    registerOmpPolicyRuntime(firstHarness.api, {
+      databasePath,
+      profileInstructionPaths: [],
+      runtimeSettings: { showStatus: false },
+      standardsCompletion: async () => undefined,
+    });
+    const notifications: string[] = [];
+    const firstContext = createContext(projectRoot, [], { notifications });
+    await firstHarness.runCommand("policy", "link @../../code-standards", firstContext);
+    await firstHarness.emit("session_shutdown", { type: "session_shutdown" }, firstContext);
+
+    const linkedRoot = await realpath(standardsRoot);
+    const firstRepository = await createPolicyRepository(databasePath);
+    expect(firstRepository.listLinkedSources(await realpath(projectRoot))).toEqual([linkedRoot]);
+    expect(firstRepository.getActiveSnapshot(await realpath(projectRoot))?.rules).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ statement: "Never use implicit any." }),
+        expect.objectContaining({ statement: "Always test behavior." }),
+      ]),
+    );
+    expect(notifications.at(-1)).toContain("Linked 2 policy sources");
+    firstRepository.close();
+
+    await writeFile(join(standardsRoot, "typescript.md"), "Never weaken type safety.\n");
+    const secondHarness = createExtensionHarness();
+    registerOmpPolicyRuntime(secondHarness.api, {
+      databasePath,
+      profileInstructionPaths: [],
+      runtimeSettings: { showStatus: false },
+      standardsCompletion: async () => undefined,
+    });
+    const scheduledCallbacks: Array<() => unknown> = [];
+    const secondContext = createContext(projectRoot, [], { scheduledCallbacks });
+    await secondHarness.emit("session_start", { type: "session_start" }, secondContext);
+    const automaticOnboarding = scheduledCallbacks.shift();
+    if (automaticOnboarding === undefined) {
+      throw new Error("Automatic onboarding was not scheduled");
+    }
+    await automaticOnboarding();
+    await secondHarness.emit("session_shutdown", { type: "session_shutdown" }, secondContext);
+
+    const secondRepository = await createPolicyRepository(databasePath);
+    const statements =
+      secondRepository
+        .getActiveSnapshot(await realpath(projectRoot))
+        ?.rules.map((rule) => rule.statement) ?? [];
+    expect(statements).toContain("Never weaken type safety.");
+    expect(statements).not.toContain("Never use implicit any.");
+    secondRepository.close();
+  });
+
   test("feeds model-selected project and runtime standards into onboarding", async () => {
     const fixture = await mkdtemp(join(tmpdir(), "omp-policy-runtime-standards-"));
     temporaryDirectories.push(fixture);

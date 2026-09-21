@@ -27,6 +27,7 @@
 
 - Automatically onboard the active Git project at session start and session switch.
 - `/policy onboard` performs the same idempotent operation manually.
+- `/policy link @<file-or-directory>` canonicalizes and persists an explicit project-wide source for the current Git project; linked sources are reread during current and future session onboarding.
 - Use OMP's active/default model to identify supplemental standards from bounded, redacted project text previews and effective skill/MCP runtime context; do not encode repository-specific standards paths.
 - Treat model selections as untrusted references: accept only inventoried in-root regular files and exact runtime-context excerpts.
 - Fall back to deterministic profile and `AGENTS.md`/`CLAUDE.md` sources when the model, credentials, completion, or response is unavailable.
@@ -48,7 +49,7 @@
 - Treat nested repositories as separate projects.
 - Apply nested `AGENTS.md` files only to their subtree.
 - Keep user-global instructions separate from project ancestry.
-- Store durable project state in profile-scoped `~/.omp/agent/policy.db`.
+- Store durable project state, including linked source paths, in profile-scoped `~/.omp/agent/policy.db`.
 - Keep credentials in OMP `AuthStorage`; do not put policy tables into `agent.db`.
 
 ## Enforcement semantics

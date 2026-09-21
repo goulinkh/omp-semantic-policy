@@ -8,12 +8,14 @@ export interface PolicyCommandInvocation {
   readonly command: string;
   readonly value?: string;
   readonly actionId?: string;
+  readonly path?: string;
 }
 
 const POLICY_SUBCOMMANDS: readonly PolicyCommandCompletion[] = [
   { label: "status", value: "status ", description: "Show the active project policy" },
   { label: "coverage", value: "coverage ", description: "Show enforcement coverage" },
   { label: "onboard", value: "onboard ", description: "Discover and compile project policy" },
+  { label: "link", value: "link @", description: "Add a persistent file or directory source" },
   { label: "review", value: "review ", description: "Review compiled policy rules" },
   { label: "audit", value: "audit ", description: "Inspect recent redacted decision traces" },
   {
@@ -69,20 +71,25 @@ export function getPolicyArgumentCompletions(
 
 /** Accept OMP's argument-only form and a defensive full-command form. */
 export function parsePolicyCommandArguments(args: string): PolicyCommandInvocation {
-  const tokens = args
-    .trim()
-    .split(/\s+/u)
-    .filter((token) => token.length > 0);
-  const first = tokens[0]?.toLowerCase();
-  if (first === "policy" || first === "/policy") {
-    tokens.shift();
+  const input = args.trim().replace(/^\/?policy(?:\s+|$)/iu, "");
+  if (input.length === 0) {
+    return { command: "status" };
   }
 
-  const command = tokens[0]?.toLowerCase() ?? "status";
-  const value = tokens[1]?.toLowerCase();
-  const actionId = tokens[2];
+  const separator = input.search(/\s/u);
+  const rawCommand = separator === -1 ? input : input.slice(0, separator);
+  const command = rawCommand.toLowerCase();
+  const remainder = separator === -1 ? "" : input.slice(separator).trim();
+  if (command === "link") {
+    const path = remainder.startsWith("@") ? remainder.slice(1).trim() : "";
+    return path.length === 0 ? { command: "invalid" } : { command, path };
+  }
+
+  const tokens = remainder.length === 0 ? [] : remainder.split(/\s+/u);
+  const value = tokens[0]?.toLowerCase();
+  const actionId = tokens[1];
   if (
-    tokens.length > 3 ||
+    tokens.length > 2 ||
     (actionId !== undefined && (command !== "maintenance" || value !== "approve"))
   ) {
     return { command: "invalid" };

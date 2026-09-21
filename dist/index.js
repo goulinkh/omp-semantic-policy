@@ -6,6 +6,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent";
 import { Loader } from "@oh-my-pi/pi-tui";
 import { createHash as createHash6, randomUUID } from "crypto";
+import { realpath as realpath7 } from "fs/promises";
 import { homedir as homedir2 } from "os";
 import { join as join5, resolve as resolve9 } from "path";
 
@@ -2102,6 +2103,7 @@ var POLICY_SUBCOMMANDS = [
   { label: "status", value: "status ", description: "Show the active project policy" },
   { label: "coverage", value: "coverage ", description: "Show enforcement coverage" },
   { label: "onboard", value: "onboard ", description: "Discover and compile project policy" },
+  { label: "link", value: "link @", description: "Add a persistent file or directory source" },
   { label: "review", value: "review ", description: "Review compiled policy rules" },
   { label: "audit", value: "audit ", description: "Inspect recent redacted decision traces" },
   {
@@ -2144,15 +2146,22 @@ function getPolicyArgumentCompletions(argumentPrefix) {
   return matches.length === 0 ? null : matches;
 }
 function parsePolicyCommandArguments(args) {
-  const tokens = args.trim().split(/\s+/u).filter((token) => token.length > 0);
-  const first = tokens[0]?.toLowerCase();
-  if (first === "policy" || first === "/policy") {
-    tokens.shift();
+  const input = args.trim().replace(/^\/?policy(?:\s+|$)/iu, "");
+  if (input.length === 0) {
+    return { command: "status" };
   }
-  const command = tokens[0]?.toLowerCase() ?? "status";
-  const value = tokens[1]?.toLowerCase();
-  const actionId = tokens[2];
-  if (tokens.length > 3 || actionId !== undefined && (command !== "maintenance" || value !== "approve")) {
+  const separator = input.search(/\s/u);
+  const rawCommand = separator === -1 ? input : input.slice(0, separator);
+  const command = rawCommand.toLowerCase();
+  const remainder = separator === -1 ? "" : input.slice(separator).trim();
+  if (command === "link") {
+    const path = remainder.startsWith("@") ? remainder.slice(1).trim() : "";
+    return path.length === 0 ? { command: "invalid" } : { command, path };
+  }
+  const tokens = remainder.length === 0 ? [] : remainder.split(/\s+/u);
+  const value = tokens[0]?.toLowerCase();
+  const actionId = tokens[1];
+  if (tokens.length > 2 || actionId !== undefined && (command !== "maintenance" || value !== "approve")) {
     return { command: "invalid" };
   }
   return {
@@ -3908,7 +3917,7 @@ function selectDispatchIntent(hostTool, hostInput, toolOperations = {}) {
 // src/adapters/omp/projects/discoverInstructionSources.ts
 import { createHash as createHash3 } from "crypto";
 import { lstat as lstat3, readFile, readdir, realpath as realpath4 } from "fs/promises";
-import { dirname as dirname3, join as join3, relative as relative5, resolve as resolve5, sep as sep4 } from "path";
+import { dirname as dirname3, extname, join as join3, relative as relative5, resolve as resolve5, sep as sep4 } from "path";
 
 // src/adapters/omp/projects/findGitProjectRoot.ts
 import { lstat as lstat2, realpath as realpath3, stat as stat2 } from "fs/promises";
@@ -3957,6 +3966,16 @@ var IGNORED_DIRECTORIES = {
   target: true,
   vendor: true
 };
+var LINKED_DIRECTORY_FILE_EXTENSIONS = {
+  ".adoc": true,
+  ".md": true,
+  ".markdown": true,
+  ".mdx": true,
+  ".prompt": true,
+  ".rst": true,
+  ".rules": true,
+  ".txt": true
+};
 async function discoverProjectInstructionSources(projectRoot) {
   const canonicalRoot = await realpath4(projectRoot);
   const sources = [];
@@ -3989,6 +4008,27 @@ async function discoverProfileInstructionSources(paths) {
     }
   }
   return sources;
+}
+async function discoverLinkedInstructionSources(projectRoot, paths) {
+  const canonicalProjectRoot = await realpath4(projectRoot);
+  const sources = [];
+  const seenFiles = new Set;
+  for (const configuredPath of paths) {
+    try {
+      const canonicalPath = await realpath4(configuredPath);
+      const stats = await lstat3(canonicalPath);
+      if (stats.isFile()) {
+        await loadLinkedFile(canonicalProjectRoot, canonicalPath, sources, seenFiles);
+      } else if (stats.isDirectory()) {
+        await walkLinkedDirectory(canonicalProjectRoot, canonicalPath, sources, seenFiles);
+      }
+    } catch (error) {
+      if (!isMissingPathError2(error)) {
+        throw error;
+      }
+    }
+  }
+  return sources.sort((left, right) => left.path.localeCompare(right.path));
 }
 async function walkProject(projectRoot, directory, sources) {
   if (directory !== projectRoot && await hasGitMarker(directory)) {
@@ -4029,6 +4069,42 @@ async function walkProject(projectRoot, directory, sources) {
     });
   }
 }
+async function walkLinkedDirectory(projectRoot, directory, sources, seenFiles) {
+  const entries = await readdir(directory, { withFileTypes: true });
+  entries.sort((left, right) => left.name.localeCompare(right.name));
+  for (const entry of entries) {
+    const entryPath = join3(directory, entry.name);
+    if (entry.isSymbolicLink()) {
+      continue;
+    }
+    if (entry.isDirectory()) {
+      if (IGNORED_DIRECTORIES[entry.name] !== true) {
+        await walkLinkedDirectory(projectRoot, entryPath, sources, seenFiles);
+      }
+      continue;
+    }
+    if (entry.isFile() && LINKED_DIRECTORY_FILE_EXTENSIONS[extname(entry.name).toLowerCase()] === true) {
+      await loadLinkedFile(projectRoot, entryPath, sources, seenFiles);
+    }
+  }
+}
+async function loadLinkedFile(projectRoot, path, sources, seenFiles) {
+  const canonicalPath = await realpath4(path);
+  if (seenFiles.has(canonicalPath)) {
+    return;
+  }
+  seenFiles.add(canonicalPath);
+  const content = await readFile(canonicalPath, "utf8");
+  sources.push({
+    id: `linked:${canonicalPath}`,
+    kind: "project",
+    path: canonicalPath,
+    scopeRoot: projectRoot,
+    content,
+    contentDigest: digestText(content),
+    precedence: 100
+  });
+}
 function digestText(content) {
   return createHash3("sha256").update(content).digest("hex");
 }
@@ -4047,11 +4123,20 @@ function createProjectOnboarder(options) {
       if (projectRoot === undefined) {
         return { kind: "no-project" };
       }
-      const [profileSources, projectSources] = await Promise.all([
+      const linkedSourcePaths = options.repository.listLinkedSources(projectRoot);
+      const [profileSources, projectSources, linkedSources] = await Promise.all([
         discoverProfileInstructionSources(options.profileInstructionPaths),
-        discoverProjectInstructionSources(projectRoot)
+        discoverProjectInstructionSources(projectRoot),
+        discoverLinkedInstructionSources(projectRoot, linkedSourcePaths)
       ]);
-      const baselineSources = [...profileSources, ...projectSources];
+      const baselineSources = [];
+      const baselinePaths = new Set;
+      for (const source of [...profileSources, ...projectSources, ...linkedSources]) {
+        if (!baselinePaths.has(source.path)) {
+          baselineSources.push(source);
+          baselinePaths.add(source.path);
+        }
+      }
       let standardsSources = [];
       try {
         standardsSources = await options.standardsSourceResolver?.resolve({
@@ -4088,7 +4173,7 @@ function createProjectOnboarder(options) {
 // src/adapters/omp/onboarding/createStandardsSourceResolver.ts
 import { createHash as createHash4 } from "crypto";
 import { lstat as lstat4, open as open2, readdir as readdir2, realpath as realpath5 } from "fs/promises";
-import { extname, join as join4, relative as relative6, resolve as resolve6, sep as sep5 } from "path";
+import { extname as extname2, join as join4, relative as relative6, resolve as resolve6, sep as sep5 } from "path";
 var IGNORED_DIRECTORIES2 = {
   ".git": true,
   build: true,
@@ -4166,7 +4251,7 @@ async function collectProjectCandidates(projectRoot, existingPaths, sanitize) {
       continue;
     }
     const relativePath = toPortablePath(relative6(projectRoot, absolutePath));
-    if (PREVIEW_EXTENSIONS[extname(relativePath).toLowerCase()] !== true) {
+    if (PREVIEW_EXTENSIONS[extname2(relativePath).toLowerCase()] !== true) {
       continue;
     }
     const rawPreview = await readTextPreview(absolutePath, Math.min(MAX_PREVIEW_BYTES, previewBudget));
@@ -4494,6 +4579,21 @@ var POLICY_DATABASE_MIGRATIONS = [
           ON audits(project_root, occurred_at_ms DESC);
       `);
     }
+  },
+  {
+    version: 2,
+    name: "linked project policy sources",
+    apply(database) {
+      database.exec(`
+        CREATE TABLE linked_sources (
+          project_root TEXT NOT NULL,
+          source_path TEXT NOT NULL,
+          added_at_ms INTEGER NOT NULL,
+          PRIMARY KEY (project_root, source_path),
+          FOREIGN KEY (project_root) REFERENCES projects(project_root) ON DELETE CASCADE
+        );
+      `);
+    }
   }
 ];
 function applyPolicyDatabaseMigrations(database, migrations = POLICY_DATABASE_MIGRATIONS) {
@@ -4562,6 +4662,13 @@ async function createPolicyRepository(databasePath) {
     INSERT INTO settings (key, value, updated_at_ms) VALUES (?, ?, ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at_ms = excluded.updated_at_ms
   `);
+  const insertLinkedSource = database.prepare(`
+    INSERT INTO linked_sources (project_root, source_path, added_at_ms) VALUES (?, ?, ?)
+    ON CONFLICT(project_root, source_path) DO NOTHING
+  `);
+  const listLinkedSources = database.prepare(`
+    SELECT source_path FROM linked_sources WHERE project_root = ? ORDER BY source_path ASC
+  `);
   const insertAudit = database.prepare(`
     INSERT INTO audits (project_root, action_id, occurred_at_ms, phase, payload_json)
     VALUES (?, ?, ?, ?, ?)
@@ -4611,6 +4718,15 @@ async function createPolicyRepository(databasePath) {
     },
     setRemoteConsent(consented, occurredAtMs = Date.now()) {
       setSetting.run(REMOTE_CONSENT_KEY, String(consented), occurredAtMs);
+    },
+    addLinkedSource(projectRoot, sourcePath, occurredAtMs = Date.now()) {
+      database.transaction(() => {
+        touchProject.run(projectRoot, occurredAtMs);
+        insertLinkedSource.run(projectRoot, sourcePath, occurredAtMs);
+      })();
+    },
+    listLinkedSources(projectRoot) {
+      return listLinkedSources.all(projectRoot).map((row) => row.source_path);
     },
     appendAudit(record) {
       insertAudit.run(record.projectRoot, record.actionId, record.occurredAtMs, record.phase, JSON.stringify(record));
@@ -5641,11 +5757,31 @@ function registerOmpPolicyRuntime(pi, options = {}) {
     description: `${POLICY_LOGO} Onboard, inspect, or configure semantic policy`,
     getArgumentCompletions: getPolicyArgumentCompletions,
     handler: async (args, context) => {
-      const { command, value, actionId } = parsePolicyCommandArguments(args);
+      const { command, value, actionId, path: linkedPath } = parsePolicyCommandArguments(args);
       if (command === "coverage") {
         context.ui.notify(formatCoverageReport(), "info");
       } else if (command === "onboard") {
         startManualOnboarding(context);
+      } else if (command === "link" && linkedPath !== undefined) {
+        try {
+          const projectRoot = await findGitProjectRoot(context.cwd);
+          if (projectRoot === undefined) {
+            context.ui.notify(brandPolicyText("A policy source can only be linked from inside a Git project."), "warning");
+            return;
+          }
+          const sourcePath = await realpath7(resolve9(context.cwd, linkedPath));
+          const linkedSources = await discoverLinkedInstructionSources(projectRoot, [sourcePath]);
+          if (linkedSources.length === 0) {
+            context.ui.notify(brandPolicyText(`No supported policy text files found at ${sourcePath}.`), "warning");
+            return;
+          }
+          const repository = await repositoryPromise;
+          repository.addLinkedSource(projectRoot, sourcePath);
+          await onboard(context, true);
+          context.ui.notify(brandPolicyText(`Linked ${linkedSources.length} policy source${linkedSources.length === 1 ? "" : "s"} from ${sourcePath}. Future sessions in this project will load ${linkedSources.length === 1 ? "it" : "them"}.`), "info");
+        } catch (error) {
+          context.ui.notify(brandPolicyText(`Policy source link failed: ${error instanceof Error ? error.message : String(error)}`), "error");
+        }
       } else if (command === "review") {
         const repository = await repositoryPromise;
         context.ui.notify(formatProjectPolicyReview(repository, activeProjectRoot), "info");
@@ -5696,7 +5832,7 @@ Review the original tool input, then /policy maintenance approve ${candidate.act
         const repository = await repositoryPromise;
         context.ui.notify(formatProjectPolicyStatus(repository, activeProjectRoot, semanticEvaluatorState), "info");
       } else {
-        context.ui.notify(brandPolicyText("Usage: /policy [status|review|coverage|onboard|audit [1\u2013100]|maintenance [approve <action-id>|revoke]|consent on|consent off]"), "warning");
+        context.ui.notify(brandPolicyText("Usage: /policy [status|review|coverage|onboard|link @<file-or-directory>|audit [1\u2013100]|maintenance [approve <action-id>|revoke]|consent on|consent off]"), "warning");
       }
     }
   });

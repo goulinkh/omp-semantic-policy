@@ -45,6 +45,21 @@ export const POLICY_DATABASE_MIGRATIONS: readonly PolicyDatabaseMigration[] = [
       `);
     },
   },
+  {
+    version: 2,
+    name: "linked project policy sources",
+    apply(database) {
+      database.exec(`
+        CREATE TABLE linked_sources (
+          project_root TEXT NOT NULL,
+          source_path TEXT NOT NULL,
+          added_at_ms INTEGER NOT NULL,
+          PRIMARY KEY (project_root, source_path),
+          FOREIGN KEY (project_root) REFERENCES projects(project_root) ON DELETE CASCADE
+        );
+      `);
+    },
+  },
 ];
 
 /** Apply each schema change atomically and record it only after success. */

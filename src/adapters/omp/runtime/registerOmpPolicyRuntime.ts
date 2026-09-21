@@ -8,6 +8,7 @@ import {
 } from "@oh-my-pi/pi-coding-agent";
 import { Loader } from "@oh-my-pi/pi-tui";
 import { createHash, randomUUID } from "node:crypto";
+import { realpath } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import type {
@@ -46,6 +47,7 @@ import {
   type StandardsModelCompletion,
 } from "../onboarding/index.js";
 import { createPolicyRepository, type PolicyRepository } from "../persistence/index.js";
+import { discoverLinkedInstructionSources, findGitProjectRoot } from "../projects/index.js";
 import { evaluateSnapshotPolicy } from "../enforcement/evaluateSnapshotPolicy.js";
 import { bindRequestAuthorization } from "../enforcement/bindRequestAuthorization.js";
 import {
@@ -808,11 +810,47 @@ export function registerOmpPolicyRuntime(
     description: `${POLICY_LOGO} Onboard, inspect, or configure semantic policy`,
     getArgumentCompletions: getPolicyArgumentCompletions,
     handler: async (args, context) => {
-      const { command, value, actionId } = parsePolicyCommandArguments(args);
+      const { command, value, actionId, path: linkedPath } = parsePolicyCommandArguments(args);
       if (command === "coverage") {
         context.ui.notify(formatCoverageReport(), "info");
       } else if (command === "onboard") {
         startManualOnboarding(context);
+      } else if (command === "link" && linkedPath !== undefined) {
+        try {
+          const projectRoot = await findGitProjectRoot(context.cwd);
+          if (projectRoot === undefined) {
+            context.ui.notify(
+              brandPolicyText("A policy source can only be linked from inside a Git project."),
+              "warning",
+            );
+            return;
+          }
+          const sourcePath = await realpath(resolve(context.cwd, linkedPath));
+          const linkedSources = await discoverLinkedInstructionSources(projectRoot, [sourcePath]);
+          if (linkedSources.length === 0) {
+            context.ui.notify(
+              brandPolicyText(`No supported policy text files found at ${sourcePath}.`),
+              "warning",
+            );
+            return;
+          }
+          const repository = await repositoryPromise;
+          repository.addLinkedSource(projectRoot, sourcePath);
+          await onboard(context, true);
+          context.ui.notify(
+            brandPolicyText(
+              `Linked ${linkedSources.length} policy source${linkedSources.length === 1 ? "" : "s"} from ${sourcePath}. Future sessions in this project will load ${linkedSources.length === 1 ? "it" : "them"}.`,
+            ),
+            "info",
+          );
+        } catch (error) {
+          context.ui.notify(
+            brandPolicyText(
+              `Policy source link failed: ${error instanceof Error ? error.message : String(error)}`,
+            ),
+            "error",
+          );
+        }
       } else if (command === "review") {
         const repository = await repositoryPromise;
         context.ui.notify(formatProjectPolicyReview(repository, activeProjectRoot), "info");
@@ -891,7 +929,7 @@ export function registerOmpPolicyRuntime(
       } else {
         context.ui.notify(
           brandPolicyText(
-            "Usage: /policy [status|review|coverage|onboard|audit [1–100]|maintenance [approve <action-id>|revoke]|consent on|consent off]",
+            "Usage: /policy [status|review|coverage|onboard|link @<file-or-directory>|audit [1–100]|maintenance [approve <action-id>|revoke]|consent on|consent off]",
           ),
           "warning",
         );

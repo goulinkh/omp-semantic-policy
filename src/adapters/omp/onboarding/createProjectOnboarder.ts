@@ -3,6 +3,7 @@ import { compilePolicySnapshot } from "../../../policy/index.js";
 import type { PolicyRepository } from "../persistence/index.js";
 import {
   discoverProfileInstructionSources,
+  discoverLinkedInstructionSources,
   discoverProjectInstructionSources,
   findGitProjectRoot,
 } from "../projects/index.js";
@@ -38,11 +39,20 @@ export function createProjectOnboarder(options: ProjectOnboarderOptions): Projec
         return { kind: "no-project" };
       }
 
-      const [profileSources, projectSources] = await Promise.all([
+      const linkedSourcePaths = options.repository.listLinkedSources(projectRoot);
+      const [profileSources, projectSources, linkedSources] = await Promise.all([
         discoverProfileInstructionSources(options.profileInstructionPaths),
         discoverProjectInstructionSources(projectRoot),
+        discoverLinkedInstructionSources(projectRoot, linkedSourcePaths),
       ]);
-      const baselineSources = [...profileSources, ...projectSources];
+      const baselineSources: InstructionSource[] = [];
+      const baselinePaths = new Set<string>();
+      for (const source of [...profileSources, ...projectSources, ...linkedSources]) {
+        if (!baselinePaths.has(source.path)) {
+          baselineSources.push(source);
+          baselinePaths.add(source.path);
+        }
+      }
       let standardsSources: readonly InstructionSource[] = [];
       try {
         standardsSources =

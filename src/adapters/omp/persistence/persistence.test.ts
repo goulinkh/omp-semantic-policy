@@ -50,6 +50,26 @@ describe("policy persistence", () => {
     expect((await stat(join(directory, "private"))).mode & 0o777).toBe(0o700);
   });
 
+  test("persists idempotent linked sources per project", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "omp-policy-links-"));
+    temporaryDirectories.push(directory);
+    const databasePath = join(directory, "policy.db");
+    const projectRoot = "/workspace/project";
+    const repository = await createPolicyRepository(databasePath);
+    repository.addLinkedSource(projectRoot, "/standards/typescript.md", 10);
+    repository.addLinkedSource(projectRoot, "/standards/security.md", 20);
+    repository.addLinkedSource(projectRoot, "/standards/typescript.md", 30);
+    repository.close();
+
+    const reopened = await createPolicyRepository(databasePath);
+    expect(reopened.listLinkedSources(projectRoot)).toEqual([
+      "/standards/security.md",
+      "/standards/typescript.md",
+    ]);
+    expect(reopened.listLinkedSources("/workspace/other")).toEqual([]);
+    reopened.close();
+  });
+
   test("returns only the latest requested audits in project-local chronological order", async () => {
     const repository = await createPolicyRepository(":memory:");
     const snapshot = createSnapshot("project-a");
@@ -79,6 +99,31 @@ describe("policy persistence", () => {
     expect(rows.map((row) => row.version)).toEqual(
       POLICY_DATABASE_MIGRATIONS.map((item) => item.version),
     );
+    database.close();
+  });
+
+  test("upgrades the previous schema without losing projects", () => {
+    const database = new Database(":memory:", { strict: true });
+    applyPolicyDatabaseMigrations(database, POLICY_DATABASE_MIGRATIONS.slice(0, 1));
+    database
+      .prepare("INSERT INTO projects (project_root, last_seen_at_ms) VALUES (?, ?)")
+      .run("/workspace/project", 10);
+
+    applyPolicyDatabaseMigrations(database);
+    database
+      .prepare(
+        "INSERT INTO linked_sources (project_root, source_path, added_at_ms) VALUES (?, ?, ?)",
+      )
+      .run("/workspace/project", "/standards", 20);
+
+    expect(
+      database.query<{ source_path: string }, []>("SELECT source_path FROM linked_sources").get()
+        ?.source_path,
+    ).toBe("/standards");
+    expect(
+      database.query<{ project_root: string }, []>("SELECT project_root FROM projects").get()
+        ?.project_root,
+    ).toBe("/workspace/project");
     database.close();
   });
 

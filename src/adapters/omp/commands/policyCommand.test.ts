@@ -4,6 +4,7 @@ import { getPolicyArgumentCompletions, parsePolicyCommandArguments } from "./pol
 describe("policy command", () => {
   test("filters subcommands and completes consent values", () => {
     expect(getPolicyArgumentCompletions("on")?.map((item) => item.label)).toEqual(["onboard"]);
+    expect(getPolicyArgumentCompletions("li")?.map((item) => item.label)).toEqual(["link"]);
     expect(getPolicyArgumentCompletions("consent ")?.map((item) => item.value)).toEqual([
       "consent on",
       "consent off",
@@ -20,6 +21,11 @@ describe("policy command", () => {
       value: "on",
     });
     expect(parsePolicyCommandArguments("")).toEqual({ command: "status" });
+    expect(parsePolicyCommandArguments("/policy link @../../Code Standards")).toEqual({
+      command: "link",
+      path: "../../Code Standards",
+    });
+    expect(parsePolicyCommandArguments("link ../../code-standards").command).toBe("invalid");
   });
 
   test("preserves case-sensitive action IDs and rejects trailing approval arguments", () => {

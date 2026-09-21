@@ -21,6 +21,8 @@ export interface PolicyRepository {
   markStale(projectRoot: string): void;
   getRemoteConsent(): boolean | undefined;
   setRemoteConsent(consented: boolean, occurredAtMs?: number): void;
+  addLinkedSource(projectRoot: string, sourcePath: string, occurredAtMs?: number): void;
+  listLinkedSources(projectRoot: string): readonly string[];
   appendAudit(record: PolicyAuditRecord): void;
   listAudits(projectRoot: string, limit?: number): readonly PolicyAuditRecord[];
   close(): void;
@@ -72,6 +74,13 @@ export async function createPolicyRepository(databasePath: string): Promise<Poli
   const setSetting = database.prepare(`
     INSERT INTO settings (key, value, updated_at_ms) VALUES (?, ?, ?)
     ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at_ms = excluded.updated_at_ms
+  `);
+  const insertLinkedSource = database.prepare(`
+    INSERT INTO linked_sources (project_root, source_path, added_at_ms) VALUES (?, ?, ?)
+    ON CONFLICT(project_root, source_path) DO NOTHING
+  `);
+  const listLinkedSources = database.prepare<{ source_path: string }, [string]>(`
+    SELECT source_path FROM linked_sources WHERE project_root = ? ORDER BY source_path ASC
   `);
   const insertAudit = database.prepare(`
     INSERT INTO audits (project_root, action_id, occurred_at_ms, phase, payload_json)
@@ -128,6 +137,15 @@ export async function createPolicyRepository(databasePath: string): Promise<Poli
     },
     setRemoteConsent(consented, occurredAtMs = Date.now()) {
       setSetting.run(REMOTE_CONSENT_KEY, String(consented), occurredAtMs);
+    },
+    addLinkedSource(projectRoot, sourcePath, occurredAtMs = Date.now()) {
+      database.transaction(() => {
+        touchProject.run(projectRoot, occurredAtMs);
+        insertLinkedSource.run(projectRoot, sourcePath, occurredAtMs);
+      })();
+    },
+    listLinkedSources(projectRoot) {
+      return listLinkedSources.all(projectRoot).map((row) => row.source_path);
     },
     appendAudit(record) {
       insertAudit.run(
