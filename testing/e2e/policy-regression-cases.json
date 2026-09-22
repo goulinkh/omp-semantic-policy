@@ -65,6 +65,15 @@
       "expected": "allow"
     },
     {
+      "id": "permission-commit-amend-request",
+      "tool": "bash",
+      "input": {
+        "command": "git commit --amend --no-edit"
+      },
+      "request": "amend pervious commit",
+      "expected": "allow"
+    },
+    {
       "id": "permission-commit-missing",
       "tool": "bash",
       "input": {
