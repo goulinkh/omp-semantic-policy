@@ -49,7 +49,7 @@
       "enabledToolCalls": {
         "type": "string",
         "default": "bash,eval,python,write,edit,task,hub,browser,computer,debug",
-        "description": "Comma-separated exact OMP tool names for remote semantic evaluation. Defaults to mutation, execution, delegation, and process-control tools; routine inspection and lsp (including write to xd://lsp) skip TypeSafe. Local path protections remain active. An empty allowlist disables remote semantic evaluation for registered tool calls."
+        "description": "Comma-separated exact OMP tool names for remote semantic evaluation. Defaults to mutation, execution, delegation, and process-control tools; routine inspection and lsp (including write to xd://lsp) skip TypeSafe. Plain-text write controls xd://resolve, xd://reject, and xd://propose always bypass policy; other device writes follow their coverage settings. Local path protections remain active on other filtered calls. An empty allowlist disables remote semantic evaluation for registered tool calls."
       },
       "disabledToolCalls": {
         "type": "string",

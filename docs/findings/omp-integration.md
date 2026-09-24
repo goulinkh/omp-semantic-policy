@@ -101,6 +101,8 @@ These surfaces are **dispatch-gated**, not sandboxed. A model may classify the r
 
 A direct `write` request to an `xd://lsp`, `xd://ast_edit`, or `xd://debug` device is still intercepted as the outer registered `write` tool call. The policy can inspect and gate the requested device action.
 
+Plain-text `write` calls to `xd://resolve`, `xd://reject`, and `xd://propose` are OMP resolution controls and skip this policy gate. `xd://resolve` can apply a staged edit, so enforcement belongs to the originating tool call; native `ast_edit` is not semantically covered by default.
+
 If an allowed LSP action subsequently edits several files, the plugin does not receive a separate final-byte decision for every file. This is another dispatch boundary. An upstream action hook should expose resolved targets before mutation when practical.
 
 ## Direct core mutations
@@ -121,7 +123,7 @@ A future process-wide policy gate must be registrable only by profile/user-trust
 | --- | --- | --- |
 | Main-session registered tools | Enforced | Pre-effect `tool_call` |
 | Built-in, custom, extension, MCP tools | Enforced | Once registry is wrapped |
-| `xd://` device request | Enforced at dispatch | Downstream multi-file effects are not individually gated |
+| `xd://` device request | Enforced at dispatch except resolution controls | Downstream multi-file effects are not individually gated |
 | Unrestricted subagent tools | Enforced | Parent extensions are propagated |
 | Restricted subagent tools | Dispatch-gated | Parent `task` call only |
 | Interactive shell/Python | Enforced at dispatch | `user_bash`, `user_python` |

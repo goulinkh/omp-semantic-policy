@@ -921,6 +921,77 @@ describe("OMP policy runtime", () => {
     },
   );
 
+  test("lets OMP resolution controls through without bypassing other writes", async () => {
+    const fixture = await mkdtemp(join(tmpdir(), "omp-policy-resolution-controls-"));
+    temporaryDirectories.push(fixture);
+    const projectRoot = join(fixture, "project");
+    const databasePath = join(fixture, "policy.db");
+    await mkdir(join(projectRoot, ".git"), { recursive: true });
+    await writeFile(join(projectRoot, "AGENTS.md"), "Never publish secrets.\n");
+    const repository = await createPolicyRepository(databasePath);
+    repository.setRemoteConsent(true);
+    repository.close();
+
+    const requests: PolicyModelRequest[] = [];
+    const harness = createExtensionHarness();
+    registerOmpPolicyRuntime(harness.api, {
+      databasePath,
+      profileInstructionPaths: [],
+      createPolicyModel: () => fixturePolicyModel(requests),
+      runtimeSettings: {
+        showStatus: false,
+        showViolationFeedback: false,
+        confirmationDefault: "deny",
+        enabledToolCalls: ["write", "resolve", "reject", "propose"],
+      },
+    });
+    const context = createContext(projectRoot);
+    await harness.emit("session_start", { type: "session_start" }, context);
+    try {
+      for (const path of ["xd://resolve", "xd://reject", "xd://propose", " XD://reject "]) {
+        expect(
+          await harness.emit(
+            "tool_call",
+            {
+              type: "tool_call",
+              toolCallId: path,
+              toolName: "write",
+              input: { path, content: "Reviewed the staged action." },
+            },
+            context,
+          ),
+        ).toBeUndefined();
+      }
+      expect(
+        await harness.emit(
+          "tool_call",
+          {
+            type: "tool_call",
+            toolCallId: "not-a-resolution-device",
+            toolName: "write",
+            input: { path: "xd://resolve/other", content: "Not JSON" },
+          },
+          context,
+        ),
+      ).toMatchObject({ block: true });
+      expect(
+        await harness.emit(
+          "tool_call",
+          {
+            type: "tool_call",
+            toolCallId: "ordinary-write",
+            toolName: "write",
+            input: { path: "notes.txt", content: "safe\n" },
+          },
+          context,
+        ),
+      ).toBeUndefined();
+      expect(requests.map((request) => request.action.id)).toEqual(["ordinary-write"]);
+    } finally {
+      await harness.emit("session_shutdown", { type: "session_shutdown" }, context);
+    }
+  });
+
   test.each([
     {
       name: "defaults",

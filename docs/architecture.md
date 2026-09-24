@@ -198,7 +198,9 @@ Registered tool-call remote coverage defaults to `bash,eval,python,write,edit,ta
 
 `toolOperations` accepts exact `name=operation` mappings (or a JSON object) for custom and MCP tools. Classifications may be `read`, `write`, `execute`, `delegate`, `network`, `workflow`, `internal`, or `unknown`; built-in classifications take precedence. Covered unclassified names remain incomplete and blocking.
 
-Native `lsp` and `write` to the exact device path `xd://lsp` share the `lsp` coverage setting. Routed calls retain their actual `write` host provenance, but enabling or disabling `write` does not change LSP coverage. Ordinary file writes and other device paths still follow `write` coverage.
+Native `lsp` and `write` to the exact device path `xd://lsp` share the `lsp` coverage setting. Routed calls retain their actual `write` host provenance, but enabling or disabling `write` does not change LSP coverage. Ordinary file writes and other JSON-routed device paths still follow `write` coverage.
+
+OMP's plain-text resolution writes (`xd://resolve`, `xd://reject`, and `xd://propose`) bypass policy evaluation regardless of `write` coverage: they finalize staged work or submit a plan, not a new JSON-routed tool request. The originating staged tool is assessed separately under its own coverage; native `ast_edit` requires opt-in for remote semantic checks. Local path checks still run on represented staging targets.
 
 Actions without applicable rules already skip semantic evaluation. Do not cache decisions solely by command text: policy snapshots, authorization, and external state can change between otherwise identical actions.
 

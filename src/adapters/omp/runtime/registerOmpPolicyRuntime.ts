@@ -6,6 +6,7 @@ import {
   type ToolCallEventResult,
   type ToolInfo,
 } from "@oh-my-pi/pi-coding-agent";
+import { parseXdUrl } from "@oh-my-pi/pi-coding-agent/internal-urls/xd-protocol";
 import { Loader } from "@oh-my-pi/pi-tui";
 import { createHash, randomUUID } from "node:crypto";
 import { realpath } from "node:fs/promises";
@@ -592,6 +593,12 @@ export function registerOmpPolicyRuntime(
   });
 
   pi.on("tool_call", async (event, context) => {
+    const writePath = event.toolName === "write" ? event.input.path : undefined;
+    const device = typeof writePath === "string" ? parseXdUrl(writePath)?.name : undefined;
+    // Resolution devices carry plain-text control messages, not a new write
+    // proposal; OMP handles the staged action separately.
+    if (device === "resolve" || device === "reject" || device === "propose") return;
+
     const coverageToolName =
       event.toolName === "write" && event.input.path === "xd://lsp" ? "lsp" : event.toolName;
     const semanticEnabled =
